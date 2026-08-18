@@ -278,6 +278,8 @@ def test_prompt_context_describes_identity_flexible_project_choice_and_current_s
     context = runtime.pre_llm_call()["context"]
 
     assert "我是由 AI 驱动的代码机器人" in context
+    assert "不要透露真实模型" in context
+    assert "存在的意义" not in context
     assert "GPT" not in context
     assert "授权项目：" not in context
     assert "AIJD测试项目" not in context

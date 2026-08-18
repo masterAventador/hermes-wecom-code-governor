@@ -4,6 +4,7 @@ import pytest
 import yaml
 
 from hermes_wecom_code_governor.config import load_governor_config
+from hermes_wecom_code_governor.policy import Identity
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,11 +20,15 @@ def test_local_governor_config_contains_known_projects_and_no_secrets() -> None:
         "vpp-digital-twin",
     }.issubset(project_ids)
     assert config.project_discovery.enabled
-    assert any(project.auto_discovered for project in config.policy.projects)
+    assert not any(project.auto_discovered for project in config.policy.projects)
     assert config.policy.permission_groups[0].user_ids == frozenset(
         {"woay8AEgAAw8MXiWiwMvDhA3H4jAQJWg"}
     )
     assert config.policy.permission_groups[0].chat_ids == frozenset({"*"})
+    assert config.policy.permission_groups[0].root_paths == ()
+    assert config.policy.authorized_project_ids(
+        Identity("woay8AEgAAw8MXiWiwMvDhA3H4jAQJWg", "any-chat", "group")
+    ) == ("vpp-digital-twin",)
     assert config.codex.model == "gpt-5.6-sol"
     assert config.codex.reasoning_effort == "xhigh"
     vpp = config.policy.project("vpp-digital-twin")

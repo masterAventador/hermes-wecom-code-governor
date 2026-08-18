@@ -56,11 +56,11 @@ projects:
         - /private/var/run/mDNSResponder
 
 permissions:
-  - name: owner-all-registered-projects
-    # 在这里追加受信任同事的企微 userid；代码和企微入口共用这一份权限。
+  - name: owner-vpp-only
+    # 当前临时只允许该企微 userid 访问 VPP 数字孪生项目。
     users:
       - woay8AEgAAw8MXiWiwMvDhA3H4jAQJWg
     chats:
       - "*"
-    roots:
-      - /Users/aventador/sourceCode
+    projects:
+      - vpp-digital-twin
