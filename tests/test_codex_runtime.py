@@ -119,7 +119,7 @@ def test_write_turn_uses_native_codex_thread_with_restricted_workspace(
                         str((tmp_path / "repo" / ".git").resolve()): "read",
                         str(git_admin.resolve()): "write",
                     },
-                    "network": {"enabled": False},
+                    "network": {"enabled": False, "allowLocalBinding": True},
                     "workspace_roots": {
                         str(worktree.resolve()): True,
                         str(git_admin.resolve()): True,

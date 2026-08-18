@@ -213,7 +213,9 @@ class CodexAppServerRunner:
                 self.PERMISSION_PROFILE: {
                     "description": self.PERMISSION_DESCRIPTION,
                     "filesystem": filesystem,
-                    "network": {"enabled": False},
+                    # 外网保持关闭；放行本机回环绑定，供 vitest 起临时本地
+                    # broker/服务做自测（与治理校验沙箱的网络策略一致）。
+                    "network": {"enabled": False, "allowLocalBinding": True},
                     "workspace_roots": {root: True for root in writable_roots},
                 }
             },
