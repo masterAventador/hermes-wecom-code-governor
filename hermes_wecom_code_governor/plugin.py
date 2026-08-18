@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_governor_config
-from .delivery import FileDeliveryService, TencentCosPublisher
+from .delivery import FileDeliveryService, LazyTencentCosPublisher
 from .host import require_supported_hermes_version
 from .policy import Identity
 from .runtime import GovernorRuntime, SessionEnvironment
@@ -307,7 +307,7 @@ def register(ctx: Any) -> None:
     config = load_governor_config(config_path)
     delivery = None
     if config.delivery is not None:
-        publisher = TencentCosPublisher.from_environment(config.delivery.cos)
+        publisher = LazyTencentCosPublisher(config.delivery.cos)
         delivery = FileDeliveryService(
             publisher,
             key_prefix=config.delivery.cos.key_prefix,

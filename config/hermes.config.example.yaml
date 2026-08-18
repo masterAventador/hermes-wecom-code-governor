@@ -5,7 +5,7 @@ model:
   openai_runtime: auto
 
 agent:
-  reasoning_effort: xhigh
+  reasoning_effort: medium
 
 session_reset:
   mode: both

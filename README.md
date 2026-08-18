@@ -49,11 +49,13 @@ Hermes 外层使用默认 agent loop 完成对话和项目分析，但不能调�
 - 本机可用的 Codex CLI
 - 已执行 `codex login`，本机 `~/.codex/auth.json` 可用；不需要 OpenAI API Key
 
-当前本机默认执行参数在 [config/governor.local.yaml](config/governor.local.yaml)：
+当前本机分层执行参数：
 
-- 模型：`gpt-5.6-sol`
-- 推理强度：`xhigh`
-- Codex CLI：`/opt/homebrew/bin/codex`
+- Hermes 外层普通对话、项目读取与任务编排使用 `gpt-5.6-sol + medium`，配置在
+  [config/hermes.config.local.yaml](config/hermes.config.local.yaml)。
+- 只有修改代码时由 `governor_codex_change` 启动的第二层 Codex 执行器使用
+  `gpt-5.6-sol + xhigh`，配置在 [config/governor.local.yaml](config/governor.local.yaml)。
+- 第二层 Codex CLI：`/opt/homebrew/bin/codex`。
 
 ## 安装
 

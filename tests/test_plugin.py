@@ -1,6 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
+import hermes_wecom_code_governor.plugin as governor_plugin
+from hermes_wecom_code_governor.delivery import TencentCosPublisher
 from hermes_wecom_code_governor.plugin import register_runtime_components, resolve_config_path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +20,17 @@ class FakeContext:
 
     def register_tool(self, **kwargs: object) -> None:
         self.tools[str(kwargs["name"])] = kwargs
+
+
+class MemoryState:
+    def __init__(self) -> None:
+        self.values: dict[str, object] = {}
+
+    def get(self, key: str, default: object = None) -> object:
+        return self.values.get(key, default)
+
+    def set(self, key: str, value: object) -> None:
+        self.values[key] = value
 
 
 class FakeRuntime:
@@ -160,3 +175,34 @@ def test_tool_handler_returns_a_model_visible_error_instead_of_raising() -> None
 
 def test_missing_plugin_setting_uses_the_local_governor_config() -> None:
     assert resolve_config_path("") == ROOT / "config" / "governor.local.yaml"
+
+
+def test_plugin_registration_does_not_initialize_optional_cos_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FullContext(FakeContext):
+        state = MemoryState()
+
+        @staticmethod
+        def get_config(name: str, default: str = "") -> str:
+            assert name == "config_path"
+            return str(ROOT / "config" / "governor.local.yaml") or default
+
+    def fail_if_cos_is_initialized(*_: object) -> object:
+        raise AssertionError("COS SDK must not load during plugin registration")
+
+    monkeypatch.setattr(governor_plugin, "require_supported_hermes_version", lambda: None)
+    monkeypatch.setattr(
+        TencentCosPublisher,
+        "from_environment",
+        fail_if_cos_is_initialized,
+    )
+    monkeypatch.setattr(
+        "hermes_wecom_code_governor.wecom_adapter.register_governed_wecom_platform",
+        lambda _ctx, _runtime: None,
+    )
+    context = FullContext()
+
+    governor_plugin.register(context)
+
+    assert set(context.hooks) == {"pre_gateway_dispatch", "pre_llm_call", "pre_tool_call"}

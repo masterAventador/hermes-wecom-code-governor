@@ -3,7 +3,7 @@ model:
   default: gpt-5.6-sol
   openai_runtime: auto
 agent:
-  reasoning_effort: xhigh
+  reasoning_effort: medium
 session_reset:
   mode: both
   idle_minutes: 120

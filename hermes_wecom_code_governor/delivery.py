@@ -82,6 +82,17 @@ class TencentCosPublisher:
         )
 
 
+class LazyTencentCosPublisher:
+    def __init__(self, config: CosDeliveryConfig) -> None:
+        self._config = config
+        self._publisher: TencentCosPublisher | None = None
+
+    def publish(self, path: Path, object_key: str) -> str:
+        if self._publisher is None:
+            self._publisher = TencentCosPublisher.from_environment(self._config)
+        return self._publisher.publish(path, object_key)
+
+
 class FileDeliveryService:
     def __init__(
         self,

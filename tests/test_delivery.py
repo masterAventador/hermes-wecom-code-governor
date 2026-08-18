@@ -10,6 +10,7 @@ from hermes_wecom_code_governor.delivery import (
     ArtifactDelivery,
     CosDeliveryConfig,
     FileDeliveryService,
+    LazyTencentCosPublisher,
     TencentCosPublisher,
     apply_governed_file_size_limits,
 )
@@ -26,6 +27,34 @@ class FakeCosPublisher:
     def publish(self, path: Path, object_key: str) -> str:
         self.calls.append((path, object_key))
         return self.url
+
+
+def test_lazy_tencent_cos_publisher_initializes_sdk_on_first_upload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = CosDeliveryConfig("bucket", "region", "prefix", 3600)
+    publisher = FakeCosPublisher()
+    initializations: list[CosDeliveryConfig] = []
+
+    def initialize(received: CosDeliveryConfig) -> FakeCosPublisher:
+        initializations.append(received)
+        return publisher
+
+    monkeypatch.setattr(
+        TencentCosPublisher,
+        "from_environment",
+        staticmethod(initialize),
+    )
+    lazy = LazyTencentCosPublisher(config)
+    artifact = tmp_path / "artifact.bin"
+    artifact.write_bytes(b"artifact")
+
+    assert initializations == []
+    assert lazy.publish(artifact, "one") == publisher.url
+    assert lazy.publish(artifact, "two") == publisher.url
+    assert initializations == [config]
+    assert publisher.calls == [(artifact, "one"), (artifact, "two")]
 
 
 def project(path: Path) -> Project:
