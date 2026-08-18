@@ -1,0 +1,713 @@
+from __future__ import annotations
+
+import hashlib
+import re
+from collections import defaultdict, deque
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+from .codex_runtime import (
+    CodexAppServerRunner,
+    CodexMode,
+    CodexRunner,
+    CodexRunRequest,
+    CodexTaskState,
+)
+from .config import GovernorConfig, build_project_catalog
+from .delivery import ArtifactDelivery, FileDeliveryService
+from .policy import Identity, Policy, Project
+from .project_inspector import ProjectInspector
+from .project_job import ProjectJobRunner
+from .state import DurableState, SessionRecord, SessionStateRepository
+from .worktree import CompletionStatus, SafetyLimits, WorktreeManager
+
+_SEPARATOR_RUN = re.compile(r"-+")
+_GOVERNOR_TOOLS = frozenset(
+    {
+        "governor_list_projects",
+        "governor_select_project",
+        "governor_project_files",
+        "governor_project_read",
+        "governor_project_search",
+        "governor_project_git",
+        "governor_codex_change",
+        "governor_project_job",
+        "governor_deliver_file",
+    }
+)
+_GOVERNED_BUILTIN_TOOLS = frozenset(
+    {"read_file", "write_file", "patch", "search_files", "terminal"}
+)
+_SAFE_CONVERSATION_TOOLS = frozenset(
+    {"clarify", "web_search", "web_extract", "vision_analyze", "video_analyze", "todo"}
+)
+
+
+@dataclass(frozen=True)
+class SessionEnvironment:
+    platform: str
+    session_key: str
+    identity: Identity
+    message_id: str = ""
+
+
+def build_task_id(title: str, *, month: int, day: int, max_title_chars: int = 20) -> str:
+    semantic: list[str] = []
+    separator_pending = False
+    for character in title.strip():
+        if character.isalnum() or character in {"_", "."}:
+            if separator_pending and semantic:
+                semantic.append("-")
+            semantic.append(character)
+            separator_pending = False
+        else:
+            separator_pending = True
+    normalized = _SEPARATOR_RUN.sub("-", "".join(semantic)).strip("-.")
+    normalized = normalized[:max_title_chars].rstrip("-.")
+    if not normalized:
+        raise ValueError("task title must contain meaningful letters or numbers")
+    return f"{month:02d}{day:02d}-{normalized}"
+
+
+class GovernorRuntime:
+    def __init__(
+        self,
+        config: GovernorConfig,
+        state: DurableState,
+        *,
+        env_provider: Callable[[], SessionEnvironment],
+        worktrees: WorktreeManager | Any | None = None,
+        codex: CodexRunner | None = None,
+        delivery: FileDeliveryService | Any | None = None,
+        jobs: ProjectJobRunner | Any | None = None,
+        inspector: ProjectInspector | Any | None = None,
+        notifier: Callable[[Identity, str], None] | None = None,
+        now: Callable[[], tuple[int, int]] | None = None,
+    ) -> None:
+        self.config = config
+        self._env_provider = env_provider
+        self._explicit_projects = tuple(
+            project for project in config.policy.projects if not project.auto_discovered
+        )
+        self._projects = {project.project_id: project for project in config.policy.projects}
+        self._state = SessionStateRepository(state, self._projects)
+        self._worktrees = worktrees or WorktreeManager(config.runtime_root)
+        self._codex = codex or CodexAppServerRunner(config.codex)
+        self._delivery = delivery
+        self._jobs = jobs or ProjectJobRunner(
+            config.runtime_root,
+            codex_binary=config.codex.codex_bin,
+        )
+        self._inspector = inspector or ProjectInspector()
+        self._notifier = notifier
+        self._pending_deliveries: dict[str, deque[ArtifactDelivery]] = defaultdict(deque)
+        if now is None:
+            from datetime import datetime
+
+            def current_month_day() -> tuple[int, int]:
+                current = datetime.now()
+                return current.month, current.day
+
+            now = current_month_day
+        self._now = now
+
+    def set_notifier(self, notifier: Callable[[Identity, str], None]) -> None:
+        self._notifier = notifier
+
+    def _notify(self, identity: Identity, message: str) -> None:
+        if self._notifier is None:
+            return
+        try:
+            self._notifier(identity, message)
+        except Exception:
+            return
+
+    def pre_gateway_dispatch(self, event: object, **_: Any) -> dict[str, str]:
+        source = getattr(event, "source", None)
+        platform = self._platform_name(getattr(source, "platform", ""))
+        if platform != "wecom":
+            return {"action": "allow"}
+        identity = Identity(
+            user_id=str(getattr(source, "user_id", "") or ""),
+            chat_id=str(getattr(source, "chat_id", "") or ""),
+            chat_type=str(getattr(source, "chat_type", "") or ""),
+        )
+        if not self._identity_is_authorized(identity):
+            return {"action": "skip", "reason": "not authorized by code governor"}
+        message_id = str(getattr(event, "message_id", "") or "").strip()
+        if message_id and not getattr(source, "message_id", None):
+            source.message_id = message_id
+        return {"action": "allow"}
+
+    def pre_llm_call(self, **_: Any) -> dict[str, str] | None:
+        env = self._env_provider()
+        if env.platform != "wecom" or not self._identity_is_authorized(env.identity):
+            return None
+        record = self._record(env)
+        if record.project_id:
+            project = self._projects.get(record.project_id)
+            if project is None or not (project.path / ".git").exists():
+                self._refresh_projects()
+                record = self._record(env)
+        # The platform adapter runs on the gateway event loop, outside the
+        # model worker's task-local ContextVars. Persist the exact identity so
+        # a later project-card callback can be correlated without parsing a
+        # Hermes session key or trusting callback-supplied identity alone.
+        self._state.save(env.session_key, record)
+        if record.project_id:
+            selected = self._projects[record.project_id]
+            current = f"当前项目：{selected.display_name}（{selected.project_id}）。"
+        else:
+            current = "当前尚未选择项目。"
+        if record.active_worktree:
+            current += (
+                f" 当前有活动 worktree：{record.active_worktree.path}，"
+                f"任务：{record.active_worktree.task_id}。"
+            )
+        selected_job_lines: list[str] = []
+        if record.project_id:
+            selected_project = self._projects[record.project_id]
+            selected_job_lines = [
+                f"- {' '.join(command)}" for command in selected_project.job_allowed_commands
+            ]
+            if selected_job_lines:
+                selected_job_lines.insert(0, "当前项目允许的受控本地任务命令：")
+
+        context = "\n".join(
+            (
+                "[代码治理插件上下文]",
+                "你的简短身份介绍固定为：我是由 AI 驱动的代码机器人。存在的意义，是让问题在"
+                "无人值守时也能继续被推进：把反馈变成可靠的代码，把重复劳动交给机器，把人的"
+                "时间留给判断与创造。不要提机器人名称、底层厂商或具体模型。",
+                "",
+                "先判断当前请求是否需要访问具体项目；普通聊天、自我介绍、"
+                "通用知识问答不需要选择项目，直接简洁回答。不要使用关键词路由，也不要把所有请求"
+                "硬塞进固定的三种分支。用户提到项目名称或路径但不能直接确定项目时，先调用 "
+                "governor_list_projects 搜索；唯一匹配可直接选择，多个匹配时才调用 clarify。"
+                "搜索结果的 match_kind 为 exact 时，必须优先使用精确匹配，不得因为同时存在名称"
+                "更长的子项目而弹卡片。"
+                "项目卡片最多放 6 个候选，choices 只能使用搜索结果中的授权项目显示名称。"
+                "开放式追问使用普通文本，不弹项目卡片。",
+                "",
+                "回复必须以用户问题为边界：只回答用户明确提出的问题，能用一句话答完就只答"
+                "一句，不主动扩展背景、建议或内部过程。除非用户明确询问，否则不要展示任务"
+                "状态、退出码、基准提交、文件大小、执行日志或存储渠道。成功交付文件时，默认"
+                "只保留一句直接结果和一个下载入口；下载入口由企微交付层自动追加，不要复述"
+                "工具返回的下载地址。",
+                "",
+                current,
+                *selected_job_lines,
+                "",
+                "用户明确提到另一个授权项目时，可以调用 governor_select_project 切换，不要被旧"
+                "项目记忆绑死。项目只读查询由你直接使用 governor_project_files、"
+                "governor_project_read、governor_project_search、governor_project_git 核验后回答；"
+                "优先一次调用取得足够证据，证据足够立即回答。只有修改代码才调用 "
+                "governor_codex_change，title 由你概括为不超过 12 个字的语义名称。收到修改工具"
+                "结果后，以其中 answer 为主要回答，并准确说明返回状态。",
+                "用户明确要求打包、测试、导出、生成产物等不修改源码的本地动作时，使用 "
+                "governor_project_job；只有修改源码才使用 governor_codex_change。任务声明了产物"
+                "时会自动完成交付，不要重复调用文件交付工具。",
+                "用户明确要求把当前项目中的现有文件发给他时，调用 governor_deliver_file；不要"
+                "在用户未要求交付文件时调用。",
+                "",
+                "默认行为只是分析或修改代码。打包、上传或部署只有在用户当前请求明确要求且存在"
+                "对应受控工具时才允许；绝不能自行打包、上传、部署、推送或发布。无法理解具体要做"
+                "什么时再追问用户，不要假装已经执行。",
+                "[/代码治理插件上下文]",
+            )
+        )
+        return {"context": context}
+
+    def pre_tool_call(self, tool_name: str, args: dict | None = None, **_: Any) -> dict | None:
+        env = self._env_provider()
+        if env.platform != "wecom":
+            return None
+        if not self._identity_is_authorized(env.identity):
+            return {"action": "block", "message": "blocked: unauthorized session"}
+        if tool_name in _GOVERNOR_TOOLS:
+            return None
+        if tool_name in _SAFE_CONVERSATION_TOOLS:
+            return None
+        if tool_name in _GOVERNED_BUILTIN_TOOLS:
+            return {
+                "action": "block",
+                "message": "blocked: project access must run through code governor tools",
+            }
+        return {
+            "action": "block",
+            "message": f"blocked: tool {tool_name!r} is not enabled for the code bot",
+        }
+
+    def list_projects(self, *, query: str = "", limit: int = 20) -> dict[str, Any]:
+        env = self._require_authorized_environment()
+        self._refresh_projects()
+        if limit < 1 or limit > 50:
+            raise ValueError("project list limit must be between 1 and 50")
+        normalized_query = query.strip().casefold()
+        projects = self._authorized_projects(env.identity)
+        match_kind = "all"
+        if normalized_query:
+            exact_projects = tuple(
+                project
+                for project in projects
+                if any(
+                    normalized_query == value.casefold()
+                    for value in (
+                        project.project_id,
+                        project.display_name,
+                        str(project.path),
+                        project.path.name,
+                    )
+                )
+            )
+            if exact_projects:
+                projects = exact_projects
+                match_kind = "exact"
+            else:
+                projects = tuple(
+                    project
+                    for project in projects
+                    if any(
+                        normalized_query in value.casefold()
+                        for value in (
+                            project.project_id,
+                            project.display_name,
+                            str(project.path),
+                        )
+                    )
+                )
+                match_kind = "contains"
+        total = len(projects)
+        return {
+            "projects": [
+                {
+                    "project_id": project.project_id,
+                    "display_name": project.display_name,
+                    "path": str(project.path),
+                }
+                for project in projects[:limit]
+            ],
+            "total": total,
+            "truncated": total > limit,
+            "match_kind": match_kind,
+        }
+
+    def is_authorized_identity(self, identity: Identity) -> bool:
+        return self._identity_is_authorized(identity)
+
+    def select_project(self, project_value: str) -> dict[str, str]:
+        env = self._require_authorized_environment()
+        if self._state.load(env.session_key) is None:
+            self._state.save(env.session_key, SessionRecord(env.identity))
+        return self.select_project_for_session(env.session_key, env.identity, project_value)
+
+    def project_choices_for_session(self, session_key: str) -> dict[str, str]:
+        self._refresh_projects()
+        record = self.session_record_for_adapter(session_key)
+        if record is None or not self._identity_is_authorized(record.identity):
+            return {}
+        return {
+            project.project_id: project.display_name
+            for project in self._authorized_projects(record.identity)
+        }
+
+    def session_record_for_adapter(self, session_key: str) -> SessionRecord | None:
+        record = self._state.load(session_key)
+        if record is None or not self._identity_is_authorized(record.identity):
+            return None
+        return record
+
+    def select_project_for_session(
+        self,
+        session_key: str,
+        identity: Identity,
+        project_value: str,
+    ) -> dict[str, str]:
+        self._refresh_projects()
+        prior = self._state.load(session_key)
+        if prior is None or prior.identity != identity:
+            raise PermissionError("project card does not belong to this user and chat")
+        if not self._identity_is_authorized(identity):
+            raise PermissionError("session identity is not authorized")
+        project = self._resolve_authorized_project(identity, project_value)
+        if prior.active_worktree and prior.project_id != project.project_id:
+            raise RuntimeError("cannot switch project while a worktree task is active")
+        self._state.save(
+            session_key,
+            SessionRecord(
+                identity,
+                project.project_id,
+                prior.active_worktree,
+                prior.active_task_thread_id,
+            ),
+        )
+        return {"project_id": project.project_id, "display_name": project.display_name}
+
+    def begin_task(self, title: str) -> dict[str, str]:
+        env = self._require_authorized_environment()
+        self._refresh_projects()
+        record = self._record(env)
+        if record.project_id is None:
+            raise RuntimeError("select an authorized project before starting a task")
+        if record.active_worktree is not None:
+            raise RuntimeError(f"an active task already exists: {record.active_worktree.task_id}")
+        month, day = self._now()
+        task_id = build_task_id(title, month=month, day=day)
+        active = self._worktrees.begin(self._projects[record.project_id], task_id)
+        self._state.save(
+            env.session_key,
+            SessionRecord(
+                env.identity,
+                record.project_id,
+                active,
+                None,
+            ),
+        )
+        return {
+            "task_id": active.task_id,
+            "project_id": active.project.project_id,
+            "worktree_path": str(active.path),
+            "base_branch": active.base_branch,
+            "branch_name": active.branch_name,
+        }
+
+    def complete_task(self) -> dict[str, str | None]:
+        env = self._require_authorized_environment()
+        record = self._record(env)
+        if record.active_worktree is None:
+            raise RuntimeError("there is no active worktree task")
+        result = self._worktrees.complete(
+            record.active_worktree,
+            SafetyLimits(
+                max_changed_files=self.config.safety.max_changed_files,
+                max_deleted_files=self.config.safety.max_deleted_files,
+            ),
+        )
+        if result.status in {CompletionStatus.MERGED, CompletionStatus.NO_CHANGES}:
+            self._state.save(
+                env.session_key,
+                SessionRecord(
+                    env.identity,
+                    record.project_id,
+                    None,
+                    None,
+                ),
+            )
+        return {
+            "status": result.status.value,
+            "commit": result.commit,
+            "message": result.message,
+        }
+
+    def project_files(
+        self,
+        *,
+        path: str = ".",
+        pattern: str = "*",
+        recursive: bool = False,
+        limit: int = 50,
+        sort: str = "path",
+        sha256: bool = False,
+    ) -> dict[str, Any]:
+        project = self._selected_project_for_read()
+        result = self._inspector.files(
+            project,
+            path=path,
+            pattern=pattern,
+            recursive=recursive,
+            limit=limit,
+            sort=sort,
+            sha256=sha256,
+        )
+        return {**result, "project": project.display_name}
+
+    def project_read(
+        self,
+        *,
+        paths: list[str],
+        start_line: int = 1,
+        max_lines: int = 200,
+    ) -> dict[str, Any]:
+        project = self._selected_project_for_read()
+        result = self._inspector.read(
+            project,
+            paths=paths,
+            start_line=start_line,
+            max_lines=max_lines,
+        )
+        return {**result, "project": project.display_name}
+
+    def project_search(
+        self,
+        *,
+        query: str,
+        path: str = ".",
+        patterns: list[str] | None = None,
+        limit: int = 50,
+        case_sensitive: bool = False,
+    ) -> dict[str, Any]:
+        project = self._selected_project_for_read()
+        result = self._inspector.search(
+            project,
+            query=query,
+            path=path,
+            patterns=patterns,
+            limit=limit,
+            case_sensitive=case_sensitive,
+        )
+        return {**result, "project": project.display_name}
+
+    def project_git(
+        self,
+        *,
+        action: str,
+        limit: int = 20,
+        revision: str | None = None,
+    ) -> dict[str, Any]:
+        project = self._selected_project_for_read()
+        result = self._inspector.git(
+            project,
+            action=action,
+            limit=limit,
+            revision=revision,
+        )
+        return {**result, "project": project.display_name}
+
+    def _selected_project_for_read(self) -> Project:
+        env = self._require_authorized_environment()
+        self._refresh_projects()
+        record = self._record(env)
+        if record.project_id is None:
+            raise RuntimeError("select an authorized project before reading code")
+        if record.active_worktree is not None:
+            raise RuntimeError(
+                "finish the active code task before starting a read-only project turn"
+            )
+        return self._projects[record.project_id]
+
+    def codex_change(self, request: str, title: str) -> dict[str, str | None]:
+        env = self._require_authorized_environment()
+        self._refresh_projects()
+        record = self._record(env)
+        if record.project_id is None:
+            raise RuntimeError("select an authorized project before changing code")
+        if record.active_worktree is None:
+            self.begin_task(title)
+            record = self._record(env)
+        active = record.active_worktree
+        if active is None:
+            raise RuntimeError("failed to create an active worktree")
+        readable, writable = self._worktrees.codex_roots(active)
+        self._notify(env.identity, f"正在修改 {active.project.display_name}，请稍候。")
+        result = self._codex.run(
+            CodexRunRequest(
+                mode=CodexMode.WRITE,
+                prompt=request,
+                cwd=active.path,
+                thread_id=record.active_task_thread_id,
+                readable_roots=readable,
+                writable_roots=writable,
+            )
+        )
+        self._state.save(
+            env.session_key,
+            SessionRecord(
+                env.identity,
+                record.project_id,
+                active,
+                result.thread_id,
+            ),
+        )
+        if result.task_state is CodexTaskState.NEEDS_INPUT:
+            return {
+                "answer": result.answer,
+                "status": "needs_input",
+                "project": active.project.display_name,
+                "commit": None,
+                "message": "",
+            }
+        completion = self._worktrees.complete(
+            active,
+            SafetyLimits(
+                max_changed_files=self.config.safety.max_changed_files,
+                max_deleted_files=self.config.safety.max_deleted_files,
+            ),
+        )
+        if completion.status in {CompletionStatus.MERGED, CompletionStatus.NO_CHANGES}:
+            self._state.save(
+                env.session_key,
+                SessionRecord(
+                    env.identity,
+                    record.project_id,
+                    None,
+                    None,
+                ),
+            )
+        return {
+            "answer": result.answer,
+            "status": completion.status.value,
+            "project": active.project.display_name,
+            "commit": completion.commit,
+            "message": completion.message,
+        }
+
+    def project_job(
+        self,
+        *,
+        argv: list[str],
+        artifact_globs: list[str] | None = None,
+        title: str,
+    ) -> dict[str, Any]:
+        env = self._require_authorized_environment()
+        project = self._selected_project_for_job()
+        if not env.message_id:
+            raise RuntimeError("project job requires the current WeCom message id")
+        normalized_title = title.strip()
+        if not normalized_title or len(normalized_title) > 12:
+            raise ValueError("job title must contain 1 to 12 characters")
+        command = tuple(argv)
+        requested_artifacts = tuple(artifact_globs or ())
+        if requested_artifacts and self._delivery is None:
+            raise RuntimeError("file delivery is not configured for generated artifacts")
+        month, day = self._now()
+        task_id = build_task_id(normalized_title, month=month, day=day)
+        message_suffix = hashlib.sha256(env.message_id.encode("utf-8")).hexdigest()[:10]
+        job_id = f"{task_id}--{message_suffix}"
+        self._notify(
+            env.identity,
+            f"正在为 {project.display_name}执行“{normalized_title}”，请稍候。",
+        )
+        result = self._jobs.run(
+            project,
+            job_id=job_id,
+            argv=command,
+            artifact_globs=requested_artifacts,
+        )
+        deliveries: list[dict[str, str | int | None]] = []
+        if result.status == "completed" and result.artifacts:
+            if self._delivery is None or result.staging_root is None:
+                raise RuntimeError("generated artifacts are missing a delivery staging root")
+            for artifact in result.artifacts:
+                delivery = self._delivery.prepare_staged(
+                    artifact,
+                    result.staging_root,
+                    env.message_id,
+                )
+                self._pending_deliveries[delivery.message_id].append(delivery)
+                deliveries.append(
+                    {
+                        "channel": delivery.channel,
+                        "filename": delivery.filename,
+                        "size_bytes": delivery.size_bytes,
+                        "download_url": delivery.download_url,
+                    }
+                )
+        return {
+            "task_id": task_id,
+            "status": result.status,
+            "exit_code": result.exit_code,
+            "output": result.output,
+            "base_commit": result.base_commit[:7],
+            "artifacts": deliveries,
+        }
+
+    def _selected_project_for_job(self) -> Project:
+        env = self._require_authorized_environment()
+        self._refresh_projects()
+        record = self._record(env)
+        if record.project_id is None:
+            raise RuntimeError("select an authorized project before starting a local job")
+        if record.active_worktree is not None:
+            raise RuntimeError("finish the active code task before starting a local job")
+        return self._projects[record.project_id]
+
+    def deliver_file(self, requested_path: str) -> dict[str, str | int | None]:
+        env = self._require_authorized_environment()
+        self._refresh_projects()
+        record = self._record(env)
+        if record.project_id is None:
+            raise RuntimeError("select an authorized project before delivering a file")
+        if not env.message_id:
+            raise RuntimeError("file delivery requires the current WeCom message id")
+        if self._delivery is None:
+            raise RuntimeError("file delivery is not configured")
+        delivery = self._delivery.prepare(
+            self._projects[record.project_id],
+            requested_path,
+            env.message_id,
+        )
+        self._pending_deliveries[delivery.message_id].append(delivery)
+        return {
+            "channel": delivery.channel,
+            "filename": delivery.filename,
+            "size_bytes": delivery.size_bytes,
+            "download_url": delivery.download_url,
+            "status": "queued_for_current_reply",
+        }
+
+    def take_pending_delivery(self, message_id: str) -> ArtifactDelivery | None:
+        pending = self._pending_deliveries.get(message_id)
+        if not pending:
+            return None
+        delivery = pending.popleft()
+        if not pending:
+            self._pending_deliveries.pop(message_id, None)
+        return delivery
+
+    def _record(self, env: SessionEnvironment) -> SessionRecord:
+        record = self._state.load(env.session_key)
+        if record is None or record.identity != env.identity:
+            return SessionRecord(env.identity)
+        if record.project_id not in self._current_policy().authorized_project_ids(env.identity):
+            return SessionRecord(env.identity)
+        return record
+
+    def _require_authorized_environment(self) -> SessionEnvironment:
+        env = self._env_provider()
+        if env.platform != "wecom" or not env.session_key:
+            raise PermissionError("governor tools require an active WeCom session")
+        if not self._identity_is_authorized(env.identity):
+            raise PermissionError("session identity is not authorized")
+        return env
+
+    def _authorized_projects(self, identity: Identity) -> tuple[Project, ...]:
+        policy = self._current_policy()
+        ids = set(policy.authorized_project_ids(identity))
+        return tuple(
+            project for project in policy.projects if project.project_id in ids
+        )
+
+    def _resolve_authorized_project(self, identity: Identity, value: str) -> Project:
+        normalized = value.strip()
+        for project in self._authorized_projects(identity):
+            if normalized in {project.project_id, project.display_name}:
+                return project
+        raise PermissionError(f"project {value!r} is not authorized")
+
+    def _refresh_projects(self) -> None:
+        if not self.config.project_discovery.enabled:
+            return
+        projects = build_project_catalog(
+            tuple(
+                project
+                for project in self._explicit_projects
+                if (project.path / ".git").exists()
+            ),
+            self.config.policy.permission_groups,
+            self.config.project_discovery,
+            runtime_root=self.config.runtime_root,
+        )
+        self._projects.clear()
+        self._projects.update((project.project_id, project) for project in projects)
+
+    def _current_policy(self) -> Policy:
+        return Policy(tuple(self._projects.values()), self.config.policy.permission_groups)
+
+    def _identity_is_authorized(self, identity: Identity) -> bool:
+        return self.config.policy.matches_identity(identity)
+
+    @staticmethod
+    def _platform_name(platform: object) -> str:
+        value = getattr(platform, "value", platform)
+        return str(value or "").lower()

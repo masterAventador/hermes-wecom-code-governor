@@ -1,0 +1,44 @@
+# 合并到 Hermes profile 的 config.yaml。企微 BotID/Secret 放在 .env，禁止写进本文件。
+model:
+  provider: openai-codex
+  default: gpt-5.6-sol
+  openai_runtime: auto
+
+agent:
+  reasoning_effort: xhigh
+
+session_reset:
+  mode: both
+  idle_minutes: 120
+  at_hour: 4
+
+toolsets:
+  - hermes-cli
+  - code_governor
+
+display:
+  tool_progress: "off"
+  interim_assistant_messages: false
+  show_commentary: false
+  runtime_footer:
+    enabled: false
+
+plugins:
+  enabled:
+    - hermes-wecom-code-governor
+  entries:
+    hermes-wecom-code-governor:
+      settings:
+        config_path: /Users/aventador/sourceCode/hermes-wecom-code-governor/config/governor.local.yaml
+
+gateway:
+  platforms:
+    wecom:
+      enabled: true
+      gateway_restart_notification: false
+      typing_indicator: false
+      extra:
+        dm_policy: open
+        group_policy: open
+        group_sessions_per_user: true
+        thread_sessions_per_user: false

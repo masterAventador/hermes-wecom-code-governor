@@ -1,0 +1,49 @@
+model:
+  provider: openai-codex
+  default: gpt-5.6-sol
+  openai_runtime: auto
+agent:
+  reasoning_effort: xhigh
+session_reset:
+  mode: both
+  idle_minutes: 120
+  at_hour: 4
+toolsets:
+  - hermes-cli
+  - code_governor
+display:
+  tool_progress: 'off'
+  interim_assistant_messages: false
+  show_commentary: false
+  busy_ack_enabled: false
+  runtime_footer:
+    enabled: false
+plugins:
+  enabled:
+    - hermes-wecom-code-governor
+  entries:
+    hermes-wecom-code-governor:
+      settings:
+        config_path: /Users/aventador/sourceCode/hermes-wecom-code-governor/config/governor.local.yaml
+gateway:
+  platforms:
+    wecom:
+      enabled: true
+      gateway_restart_notification: false
+      typing_indicator: false
+      extra:
+        dm_policy: allowlist
+        allow_from:
+          - woay8AEgAAw8MXiWiwMvDhA3H4jAQJWg
+        group_policy: allowlist
+        group_allow_from:
+          - '*'
+        groups:
+          '*':
+            allow_from:
+              - woay8AEgAAw8MXiWiwMvDhA3H4jAQJWg
+        group_sessions_per_user: true
+        thread_sessions_per_user: false
+onboarding:
+  seen:
+    busy_input_prompt: true

@@ -1,0 +1,66 @@
+version: 1
+runtime_root: /Users/aventador/sourceCode/hermes-wecom-code-governor/.runtime/worktrees
+
+safety:
+  card_ttl_seconds: 300
+  max_changed_files: 100
+  max_deleted_files: 5
+
+project_discovery:
+  enabled: true
+  max_projects: 500
+
+codex:
+  model: gpt-5.6-sol
+  reasoning_effort: xhigh
+  binary: /opt/homebrew/bin/codex
+delivery:
+  wecom_file_max_bytes: 52428800
+  cos:
+    bucket: vpp-setup-1424480216
+    region: ap-beijing
+    key_prefix: electron-builds
+    url_expires_seconds: 604800
+
+projects:
+  - id: aijd-demo
+    name: AIJD测试项目
+    path: /Users/aventador/sourceCode/bjx/aijd-demo
+    base_branch: dev
+
+  - id: vpp-digital-twin
+    name: VPP数字孪生项目
+    path: /Users/aventador/sourceCode/vpp-digital-twin
+    base_branch: main
+    validation_commands:
+      - [npm, test]
+    job:
+      allowed_commands:
+        - [npm, test]
+        - [npm, run, "build:win", "--", "--config.electronDownload.isVerifyChecksum=false"]
+      artifact_globs:
+        - release/*.exe
+      timeout_seconds: 1800
+      seed_paths:
+        - node_modules
+      home_seeds:
+        - source: /Users/aventador/Library/Caches/electron
+          target: Library/Caches/electron
+        - source: /Users/aventador/Library/Caches/electron-builder
+          target: Library/Caches/electron-builder
+      readable_paths:
+        - /opt/homebrew
+        - /System/Cryptexes
+        - /System/Volumes/Preboot/Cryptexes/OS
+      unix_sockets:
+        - /private/var/run/mDNSResponder
+
+permissions:
+  - name: owner-all-registered-projects
+    # 在这里追加受信任同事的企微 userid；代码和企微入口共用这一份权限。
+    users:
+      - woay8AEgAAw8MXiWiwMvDhA3H4jAQJWg
+    chats:
+      - "*"
+    roots:
+      - /Users/aventador/sourceCode

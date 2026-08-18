@@ -1,0 +1,37 @@
+name: hermes-wecom-code-governor
+version: "0.1.0"
+description: 面向企微 Hermes 代码机器人的本机权限、worktree 与项目卡片治理插件
+author: aventador
+kind: standalone
+license: MIT
+homepage: https://github.com/
+hooks:
+  - pre_gateway_dispatch
+  - pre_llm_call
+  - pre_tool_call
+provides_hooks:
+  - pre_gateway_dispatch
+  - pre_llm_call
+  - pre_tool_call
+provides_tools:
+  - governor_list_projects
+  - governor_select_project
+  - governor_project_files
+  - governor_project_read
+  - governor_project_search
+  - governor_project_git
+  - governor_codex_change
+  - governor_project_job
+  - governor_deliver_file
+python_dependencies:
+  - PyYAML>=6.0,<7
+  - openai-codex==0.144.4
+  - cos-python-sdk-v5==1.9.44
+config_schema:
+  type: object
+  properties:
+    config_path:
+      type: string
+      description: 代码治理 YAML 配置的绝对路径
+  required:
+    - config_path

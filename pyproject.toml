@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-wecom-code-governor"
+version = "0.1.0"
+description = "受控的 Hermes 企微代码机器人治理插件"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "PyYAML>=6.0,<7",
+  "cos-python-sdk-v5==1.9.44",
+  "openai-codex==0.144.4",
+]
+
+[project.entry-points."hermes_agent.plugins"]
+hermes-wecom-code-governor = "hermes_wecom_code_governor.plugin"
+
+[project.optional-dependencies]
+dev = ["pytest>=9,<10", "ruff>=0.15,<0.16"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.setuptools.packages.find]
+include = ["hermes_wecom_code_governor*"]
+
+[tool.ruff]
+extend-exclude = [".runtime"]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
