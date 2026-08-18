@@ -696,6 +696,100 @@ def test_codex_change_needing_input_keeps_worktree_and_resumes_same_thread() -> 
     assert completed["status"] == "merged"
 
 
+def test_same_message_retry_sends_the_brief_notice_only_once() -> None:
+    notices: list[str] = []
+    state = MemoryState()
+    worktrees = FakeWorktrees()
+    codex = FakeCodex(
+        [
+            CodexRunResult("write-thread", "请确认修改范围。", CodexTaskState.NEEDS_INPUT),
+            CodexRunResult("write-thread", "请再确认一次。", CodexTaskState.NEEDS_INPUT),
+        ],
+        [],
+    )
+    runtime = make_runtime(
+        state=state,
+        worktrees=worktrees,
+        codex=codex,
+        notifier=lambda _identity, text: notices.append(text),
+    )
+    runtime.select_project("aijd-demo")
+
+    runtime.codex_change("修复接口问题", "修复接口")
+    runtime.codex_change("修复接口问题", "修复接口")
+
+    assert len(notices) == 1
+
+
+def test_new_message_sends_the_brief_notice_again() -> None:
+    notices: list[str] = []
+    state = MemoryState()
+    worktrees = FakeWorktrees()
+    codex = FakeCodex(
+        [
+            CodexRunResult("write-thread", "请确认修改范围。", CodexTaskState.NEEDS_INPUT),
+            CodexRunResult("write-thread", "已经修改。", CodexTaskState.COMPLETED),
+        ],
+        [],
+    )
+    environments = iter(
+        [
+            SessionEnvironment(
+                platform="wecom",
+                session_key="agent:main:wecom:group:chat-1:user-1",
+                identity=Identity("user-1", "chat-1", "group"),
+                message_id="message-1",
+            ),
+            SessionEnvironment(
+                platform="wecom",
+                session_key="agent:main:wecom:group:chat-1:user-1",
+                identity=Identity("user-1", "chat-1", "group"),
+                message_id="message-2",
+            ),
+        ]
+    )
+    current = next(environments)
+
+    def env_provider() -> SessionEnvironment:
+        return current
+
+    runtime = GovernorRuntime(
+        GovernorConfig(
+            Path("/runtime"),
+            SafetyConfig(),
+            Policy(
+                (
+                    Project(
+                        "aijd-demo",
+                        "AIJD测试项目",
+                        Path("/Users/aventador/sourceCode/bjx/aijd-demo"),
+                    ),
+                ),
+                (
+                    PermissionGroup(
+                        "owner",
+                        frozenset({"user-1"}),
+                        frozenset({"chat-1"}),
+                        frozenset({"aijd-demo"}),
+                    ),
+                ),
+            ),
+        ),
+        state,
+        env_provider=env_provider,
+        worktrees=worktrees,
+        codex=codex,
+        notifier=lambda _identity, text: notices.append(text),
+        now=lambda: (8, 18),
+    )
+    runtime.select_project("aijd-demo")
+    runtime.codex_change("修复接口问题", "修复接口")
+    current = next(environments)
+    runtime.codex_change("继续完成修改", "不会创建新任务")
+
+    assert len(notices) == 2
+
+
 def test_codex_change_grants_project_readable_paths_to_codex() -> None:
     worktrees = FakeWorktrees()
     codex = FakeCodex(

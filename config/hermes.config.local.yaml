@@ -4,6 +4,11 @@ model:
   openai_runtime: auto
 agent:
   reasoning_effort: medium
+timeouts:
+  tools:
+    # Codex 改码 + 全量自测常态就要超过默认 420s；2 小时兜底，避免长任务
+    # 被掐断后靠外层重试挽救（浪费轮次并造成重复"正在修改"通知）。
+    concurrent_batch: 7200
 session_reset:
   mode: both
   idle_minutes: 120

@@ -76,6 +76,7 @@ def test_hermes_config_patch_pins_subscription_model_and_plugin() -> None:
         "openai_runtime": "auto",
     }
     assert data["agent"]["reasoning_effort"] == "medium"
+    assert data["timeouts"]["tools"]["concurrent_batch"] == 7200
     assert data["model"].get("openai_runtime", "auto") == "auto"
     assert "hermes-wecom-code-governor" in data["plugins"]["enabled"]
     assert data["gateway"]["platforms"]["wecom"]["extra"]["group_sessions_per_user"] is True

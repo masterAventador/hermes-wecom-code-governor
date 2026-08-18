@@ -102,6 +102,9 @@ class GovernorRuntime:
         self._inspector = inspector or ProjectInspector()
         self._notifier = notifier
         self._pending_deliveries: dict[str, deque[ArtifactDelivery]] = defaultdict(deque)
+        # 工具超时后外层会带同一条消息重试 codex_change；按 message_id 去重，
+        # 避免用户在群里收到重复的"正在修改"提示。
+        self._codex_notice_messages: dict[str, str] = {}
         if now is None:
             from datetime import datetime
 
@@ -500,7 +503,10 @@ class GovernorRuntime:
         if resumed:
             self._worktrees.ensure_seeded(active)
         readable, writable = self._worktrees.codex_roots(active)
-        self._notify(env.identity, f"正在修改 {active.project.display_name}，请稍候。")
+        if not env.message_id or self._codex_notice_messages.get(env.session_key) != env.message_id:
+            self._notify(env.identity, f"正在修改 {active.project.display_name}，请稍候。")
+            if env.message_id:
+                self._codex_notice_messages[env.session_key] = env.message_id
         result = self._codex.run(
             CodexRunRequest(
                 mode=CodexMode.WRITE,
