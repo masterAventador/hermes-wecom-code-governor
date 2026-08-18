@@ -18,12 +18,12 @@ class Project:
     path: Path
     base_branch: str | None = None
     validation_commands: tuple[tuple[str, ...], ...] = ()
+    seed_paths: tuple[str, ...] = ()
+    readable_paths: tuple[Path, ...] = ()
     job_allowed_commands: tuple[tuple[str, ...], ...] = ()
     job_artifact_globs: tuple[str, ...] = ()
     job_timeout_seconds: int = 1800
-    job_seed_paths: tuple[str, ...] = ()
     job_home_seeds: tuple[tuple[Path, Path], ...] = ()
-    job_readable_paths: tuple[Path, ...] = ()
     job_unix_sockets: tuple[Path, ...] = ()
     auto_discovered: bool = False
 

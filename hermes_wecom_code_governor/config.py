@@ -195,6 +195,11 @@ def _parse_project(raw: Any, index: int) -> Project:
     prefix = f"projects[{index}]"
     job = data.get("job")
     job_data = _mapping(job, f"{prefix}.job") if job is not None else {}
+    for moved_key in ("seed_paths", "readable_paths"):
+        if moved_key in job_data:
+            raise ValueError(
+                f"{prefix}.job.{moved_key} has moved to the project level: {prefix}.{moved_key}"
+            )
     return Project(
         project_id=_required_string(data, "id", f"{prefix}.id"),
         display_name=_required_string(data, "name", f"{prefix}.name"),
@@ -202,6 +207,13 @@ def _parse_project(raw: Any, index: int) -> Project:
         base_branch=_optional_string(data.get("base_branch"), f"{prefix}.base_branch"),
         validation_commands=_commands(
             data.get("validation_commands"), f"{prefix}.validation_commands"
+        ),
+        seed_paths=_relative_paths(data.get("seed_paths"), f"{prefix}.seed_paths"),
+        readable_paths=tuple(
+            _absolute_path(value, f"{prefix}.readable_paths[{path_index}]")
+            for path_index, value in enumerate(
+                _list(data.get("readable_paths", []), f"{prefix}.readable_paths")
+            )
         ),
         job_allowed_commands=_commands(
             job_data.get("allowed_commands"), f"{prefix}.job.allowed_commands"
@@ -217,14 +229,7 @@ def _parse_project(raw: Any, index: int) -> Project:
             if job_data
             else 1800
         ),
-        job_seed_paths=_relative_paths(job_data.get("seed_paths"), f"{prefix}.job.seed_paths"),
         job_home_seeds=_home_seeds(job_data.get("home_seeds"), f"{prefix}.job.home_seeds"),
-        job_readable_paths=tuple(
-            _absolute_path(value, f"{prefix}.job.readable_paths[{path_index}]")
-            for path_index, value in enumerate(
-                _list(job_data.get("readable_paths", []), f"{prefix}.job.readable_paths")
-            )
-        ),
         job_unix_sockets=tuple(
             _absolute_path(value, f"{prefix}.job.unix_sockets[{socket_index}]")
             for socket_index, value in enumerate(

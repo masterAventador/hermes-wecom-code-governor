@@ -110,6 +110,53 @@ def test_begin_accepts_short_semantic_chinese_task_name(tmp_path: Path) -> None:
     assert git(active.path, "branch", "--show-current") == active.branch_name
 
 
+def create_repo_with_ignored_dependencies(tmp_path: Path) -> Path:
+    repo = create_repo(tmp_path)
+    (repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-m", "ignore dependencies")
+    dependency = repo / "node_modules" / "dep"
+    dependency.mkdir(parents=True)
+    (dependency / "index.js").write_text("module.exports = 1\n", encoding="utf-8")
+    return repo
+
+
+def test_begin_seeds_configured_dependency_paths_into_the_worktree(tmp_path: Path) -> None:
+    repo = create_repo_with_ignored_dependencies(tmp_path)
+    manager = WorktreeManager(tmp_path / "runtime")
+
+    active = manager.begin(project(repo, seed_paths=("node_modules",)), "0818-seeded")
+
+    assert (active.path / "node_modules" / "dep" / "index.js").is_file()
+    result = manager.complete(active, SafetyLimits(max_changed_files=10, max_deleted_files=2))
+    assert result.status is CompletionStatus.NO_CHANGES
+    assert not active.path.exists()
+
+
+def test_ensure_seeded_backfills_an_existing_worktree_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    repo = create_repo_with_ignored_dependencies(tmp_path)
+    manager = WorktreeManager(tmp_path / "runtime")
+    configured = project(repo, seed_paths=("node_modules",))
+    active = manager.begin(configured, "0818-backfill")
+    shutil.rmtree(active.path / "node_modules")
+
+    manager.ensure_seeded(active)
+    assert (active.path / "node_modules" / "dep" / "index.js").is_file()
+
+    manager.ensure_seeded(active)
+    assert (active.path / "node_modules" / "dep" / "index.js").is_file()
+
+
+def test_begin_rejects_a_seed_path_escaping_the_repository(tmp_path: Path) -> None:
+    repo = create_repo_with_ignored_dependencies(tmp_path)
+    manager = WorktreeManager(tmp_path / "runtime")
+
+    with pytest.raises(PermissionError, match="seed path"):
+        manager.begin(project(repo, seed_paths=("../outside",)), "0818-seed-escape")
+
+
 def test_begin_falls_back_to_main_without_creating_dev(tmp_path: Path) -> None:
     repo = create_repo(tmp_path, with_dev=False)
     manager = WorktreeManager(tmp_path / "runtime")
@@ -172,6 +219,60 @@ def test_failed_validation_keeps_worktree_and_does_not_change_base(tmp_path: Pat
     assert git(repo, "rev-parse", "dev") == original
     assert active.path.exists()
     assert active.branch_name in git(repo, "branch", "--format=%(refname:short)").splitlines()
+
+
+_LOOPBACK_SERVER_SCRIPT = (
+    "import socket\n"
+    "server = socket.socket()\n"
+    "server.bind(('0.0.0.0', 0))\n"
+    "server.listen(1)\n"
+    "port = server.getsockname()[1]\n"
+    "client = socket.socket()\n"
+    "client.settimeout(5)\n"
+    "client.connect(('127.0.0.1', port))\n"
+    "server.accept()\n"
+)
+
+_EXTERNAL_CONNECT_SCRIPT = (
+    "import errno, socket, sys\n"
+    "client = socket.socket()\n"
+    "client.settimeout(3)\n"
+    "try:\n"
+    "    client.connect(('192.0.2.1', 9))\n"
+    "except OSError as error:\n"
+    "    sys.exit(0 if error.errno in (errno.EPERM, errno.EACCES) else 2)\n"
+    "sys.exit(2)\n"
+)
+
+
+def test_validation_command_can_use_loopback_network_for_local_test_servers(
+    tmp_path: Path,
+) -> None:
+    repo = create_repo(tmp_path)
+    manager = WorktreeManager(tmp_path / "runtime")
+    active = manager.begin(
+        project(repo, validation_commands=(("python3", "-c", _LOOPBACK_SERVER_SCRIPT),)),
+        "0818-loopback",
+    )
+    (active.path / "README.md").write_text("changed\n", encoding="utf-8")
+
+    result = manager.complete(active, SafetyLimits(max_changed_files=10, max_deleted_files=2))
+
+    assert result.status is CompletionStatus.MERGED
+
+
+def test_validation_command_still_cannot_reach_external_network(tmp_path: Path) -> None:
+    repo = create_repo(tmp_path)
+    manager = WorktreeManager(tmp_path / "runtime")
+    active = manager.begin(
+        project(repo, validation_commands=(("python3", "-c", _EXTERNAL_CONNECT_SCRIPT),)),
+        "0818-no-external",
+    )
+    (active.path / "README.md").write_text("changed\n", encoding="utf-8")
+
+    result = manager.complete(active, SafetyLimits(max_changed_files=10, max_deleted_files=2))
+
+    assert result.status is CompletionStatus.MERGED
 
 
 def test_mass_deletion_is_blocked_before_validation_and_keeps_recovery_state(

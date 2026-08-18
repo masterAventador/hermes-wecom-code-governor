@@ -9,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 
 from .policy import Project
+from .seeding import require_safe_seed_paths, seed_workspace
 
 _SAFE_TASK_ID = re.compile(r"^[\w.-]+$")
 
@@ -51,6 +52,7 @@ class WorktreeManager:
     def begin(self, project: Project, task_id: str) -> ActiveWorktree:
         if not _SAFE_TASK_ID.fullmatch(task_id):
             raise ValueError("task id may only contain letters, numbers, dot, dash and underscore")
+        require_safe_seed_paths(project.seed_paths)
 
         repo = project.path.resolve()
         self._require_git_repository(repo)
@@ -82,7 +84,7 @@ class WorktreeManager:
             str(worktree_path),
             base_branch,
         )
-        return ActiveWorktree(
+        active = ActiveWorktree(
             project=project,
             task_id=task_id,
             path=worktree_path,
@@ -90,6 +92,14 @@ class WorktreeManager:
             base_branch=base_branch,
             base_commit=base_commit,
         )
+        self.ensure_seeded(active)
+        return active
+
+    @staticmethod
+    def ensure_seeded(active: ActiveWorktree) -> None:
+        project = active.project
+        require_safe_seed_paths(project.seed_paths)
+        seed_workspace(project.path, active.path, project.seed_paths, skip_existing=True)
 
     def complete(
         self,
@@ -232,6 +242,10 @@ class WorktreeManager:
                 "(version 1)",
                 "(allow default)",
                 "(deny network*)",
+                # 校验里的测试常需要本机回环端口（临时 MQTT broker、本地测试服务），
+                # 只放行本地监听和到 localhost 的出站，外部网络仍然全部拒绝。
+                '(allow network-bind network-inbound (local ip "*:*"))',
+                '(allow network-outbound (remote ip "localhost:*"))',
                 "(deny file-write*)",
                 '(allow file-write* (literal "/dev/null"))',
                 f'(allow file-write* (subpath "{sbpl(active.path)}"))',

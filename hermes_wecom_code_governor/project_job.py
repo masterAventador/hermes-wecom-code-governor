@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from .policy import Project
+from .seeding import copy_seed, require_safe_seed_paths, seed_workspace
 
 _SAFE_JOB_ID = re.compile(r"^[\w.-]+$")
 _MAX_JOB_OUTPUT_CHARS = 12_000
@@ -217,7 +218,7 @@ class ProjectJobRunner:
                     temporary=temporary,
                     argv=argv,
                     timeout_seconds=project.job_timeout_seconds,
-                    readable_paths=project.job_readable_paths,
+                    readable_paths=project.readable_paths,
                     unix_sockets=project.job_unix_sockets,
                 )
             )
@@ -311,41 +312,20 @@ class ProjectJobRunner:
                 or ".git" in pure.parts
             ):
                 raise PermissionError("artifact glob is not allowed for this project")
-        for seed_path in project.job_seed_paths:
-            pure = PurePosixPath(seed_path)
-            if pure.is_absolute() or ".." in pure.parts or ".git" in pure.parts:
-                raise PermissionError("project seed path must stay inside the repository")
+        require_safe_seed_paths(project.seed_paths)
         for _, target in project.job_home_seeds:
             if target.is_absolute() or ".." in target.parts:
                 raise PermissionError("home seed target must stay inside the isolated home")
 
-    def _seed_job(self, project: Project, workspace: Path, home: Path) -> None:
-        repo = project.path.resolve()
-        for relative in project.job_seed_paths:
-            source = (repo / relative).resolve(strict=True)
-            if not source.is_relative_to(repo):
-                raise PermissionError("project seed path must stay inside the repository")
-            destination = workspace / relative
-            self._copy_seed(source, destination)
+    @staticmethod
+    def _seed_job(project: Project, workspace: Path, home: Path) -> None:
+        seed_workspace(project.path, workspace, project.seed_paths)
         for source_path, relative_target in project.job_home_seeds:
             source = source_path.resolve(strict=True)
             destination = (home / relative_target).resolve()
             if not destination.is_relative_to(home.resolve()):
                 raise PermissionError("home seed target must stay inside the isolated home")
-            self._copy_seed(source, destination)
-
-    @staticmethod
-    def _copy_seed(source: Path, destination: Path) -> None:
-        if destination.exists():
-            raise RuntimeError(f"job seed destination already exists: {destination}")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if source.is_dir():
-            shutil.copytree(source, destination, symlinks=True)
-            return
-        if source.is_file():
-            shutil.copy2(source, destination)
-            return
-        raise ValueError(f"job seed must be a file or directory: {source}")
+            copy_seed(source, destination)
 
     def _select_base_branch(self, repo: Path, configured: str | None) -> str:
         if configured is not None:

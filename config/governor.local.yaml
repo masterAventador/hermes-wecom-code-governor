@@ -34,6 +34,12 @@ projects:
     base_branch: main
     validation_commands:
       - [npm, test]
+    seed_paths:
+      - node_modules
+    readable_paths:
+      - /opt/homebrew
+      - /System/Cryptexes
+      - /System/Volumes/Preboot/Cryptexes/OS
     job:
       allowed_commands:
         - [npm, test]
@@ -41,17 +47,11 @@ projects:
       artifact_globs:
         - release/*.exe
       timeout_seconds: 1800
-      seed_paths:
-        - node_modules
       home_seeds:
         - source: /Users/aventador/Library/Caches/electron
           target: Library/Caches/electron
         - source: /Users/aventador/Library/Caches/electron-builder
           target: Library/Caches/electron-builder
-      readable_paths:
-        - /opt/homebrew
-        - /System/Cryptexes
-        - /System/Volumes/Preboot/Cryptexes/OS
       unix_sockets:
         - /private/var/run/mDNSResponder
 

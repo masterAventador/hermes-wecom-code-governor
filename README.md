@@ -22,8 +22,11 @@ Hermes 外层使用默认 agent loop 完成对话和项目分析，但不能调�
 
 - 未通过 `userid + chatid` 白名单的企微消息在进入模型前静默丢弃。
 - 每个权限组只能访问配置中授权的项目或根目录。
-- 修改前由脚本创建独立 Git worktree，Codex 不直接修改基准工作区。
-- Codex 使用命名 permission profile：只读最小系统路径和授权根目录，只写当前 worktree
+- 修改前由脚本创建独立 Git worktree，Codex 不直接修改基准工作区。项目级 `seed_paths`
+  （如 `node_modules`）在创建和恢复 worktree 时从基准仓库幂等拷入，保证隔离环境可以
+  自测；种子路径受 gitignore 保护，不会被提交或合并。
+- Codex 使用命名 permission profile：只读最小系统路径、授权根目录和项目级
+  `readable_paths`（如 `/opt/homebrew`，保证 node 等运行时可执行），只写当前 worktree
   及该 worktree 对应的 Git 管理目录。
 - Codex 命令网络默认关闭，所有提权审批自动拒绝；企微和对象存储密钥不会传给 Codex 子进程。
 - `.env` 与 `.env.*` 在 Codex 权限组中显式禁止读取。

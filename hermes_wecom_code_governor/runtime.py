@@ -490,12 +490,15 @@ class GovernorRuntime:
         record = self._record(env)
         if record.project_id is None:
             raise RuntimeError("select an authorized project before changing code")
+        resumed = record.active_worktree is not None
         if record.active_worktree is None:
             self.begin_task(title)
             record = self._record(env)
         active = record.active_worktree
         if active is None:
             raise RuntimeError("failed to create an active worktree")
+        if resumed:
+            self._worktrees.ensure_seeded(active)
         readable, writable = self._worktrees.codex_roots(active)
         self._notify(env.identity, f"正在修改 {active.project.display_name}，请稍候。")
         result = self._codex.run(
@@ -504,7 +507,7 @@ class GovernorRuntime:
                 prompt=request,
                 cwd=active.path,
                 thread_id=record.active_task_thread_id,
-                readable_roots=readable,
+                readable_roots=(*readable, *active.project.readable_paths),
                 writable_roots=writable,
             )
         )
@@ -672,9 +675,7 @@ class GovernorRuntime:
     def _authorized_projects(self, identity: Identity) -> tuple[Project, ...]:
         policy = self._current_policy()
         ids = set(policy.authorized_project_ids(identity))
-        return tuple(
-            project for project in policy.projects if project.project_id in ids
-        )
+        return tuple(project for project in policy.projects if project.project_id in ids)
 
     def _resolve_authorized_project(self, identity: Identity, value: str) -> Project:
         normalized = value.strip()
@@ -688,9 +689,7 @@ class GovernorRuntime:
             return
         projects = build_project_catalog(
             tuple(
-                project
-                for project in self._explicit_projects
-                if (project.path / ".git").exists()
+                project for project in self._explicit_projects if (project.path / ".git").exists()
             ),
             self.config.policy.permission_groups,
             self.config.project_discovery,

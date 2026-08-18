@@ -43,8 +43,8 @@ def test_local_governor_config_contains_known_projects_and_no_secrets() -> None:
         ),
     )
     assert vpp.job_artifact_globs == ("release/*.exe",)
-    assert vpp.job_seed_paths == ("node_modules",)
-    assert vpp.job_readable_paths == (
+    assert vpp.seed_paths == ("node_modules",)
+    assert vpp.readable_paths == (
         Path("/opt/homebrew"),
         Path("/System/Cryptexes"),
         Path("/System/Volumes/Preboot/Cryptexes/OS"),

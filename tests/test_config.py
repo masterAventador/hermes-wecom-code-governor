@@ -38,6 +38,11 @@ projects:
     path: /workspace/sourceCode/vpp-digital-twin
     validation_commands:
       - [npm, test]
+    seed_paths:
+      - node_modules
+    readable_paths:
+      - /opt/homebrew
+      - /System/Cryptexes
     job:
       allowed_commands:
         - [npm, test]
@@ -45,14 +50,9 @@ projects:
       artifact_globs:
         - release/*.exe
       timeout_seconds: 1800
-      seed_paths:
-        - node_modules
       home_seeds:
         - source: /workspace/cache/electron
           target: Library/Caches/electron
-      readable_paths:
-        - /opt/homebrew
-        - /System/Cryptexes
       unix_sockets:
         - /private/var/run/mDNSResponder
 permissions:
@@ -87,12 +87,43 @@ permissions:
     assert vpp.job_allowed_commands == (("npm", "test"), ("npm", "run", "*"))
     assert vpp.job_artifact_globs == ("release/*.exe",)
     assert vpp.job_timeout_seconds == 1800
-    assert vpp.job_seed_paths == ("node_modules",)
+    assert vpp.seed_paths == ("node_modules",)
     assert vpp.job_home_seeds == (
         (Path("/workspace/cache/electron"), Path("Library/Caches/electron")),
     )
-    assert vpp.job_readable_paths == (Path("/opt/homebrew"), Path("/System/Cryptexes"))
+    assert vpp.readable_paths == (Path("/opt/homebrew"), Path("/System/Cryptexes"))
     assert vpp.job_unix_sockets == (Path("/private/var/run/mDNSResponder"),)
+
+
+@pytest.mark.parametrize("legacy_key", ["seed_paths", "readable_paths"])
+def test_legacy_job_level_seed_and_readable_paths_are_rejected(
+    tmp_path: Path, legacy_key: str
+) -> None:
+    config_path = tmp_path / "governor.yaml"
+    config_path.write_text(
+        f"""
+version: 1
+runtime_root: /runtime/hermes-governor
+projects:
+  - id: vpp
+    name: VPP数字孪生项目
+    path: /workspace/sourceCode/vpp-digital-twin
+    job:
+      allowed_commands:
+        - [npm, test]
+      {legacy_key}:
+        - node_modules
+permissions:
+  - name: owner
+    users: [owner]
+    chats: ['*']
+    projects: ['*']
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=f"projects\\[0\\].{legacy_key}"):
+        load_governor_config(config_path)
 
 
 def test_codex_reasoning_effort_is_configurable(tmp_path: Path) -> None:

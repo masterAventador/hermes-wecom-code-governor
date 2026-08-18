@@ -265,7 +265,7 @@ def test_project_dependencies_and_build_caches_are_copied_into_the_isolated_job(
     runner = ProjectJobRunner(tmp_path / "runtime", executor=SeedAwareExecutor())
     configured = project(
         repo,
-        job_seed_paths=("node_modules",),
+        seed_paths=("node_modules",),
         job_home_seeds=((cache_source, Path("Library/Caches/electron")),),
         job_artifact_globs=(),
     )
@@ -285,7 +285,7 @@ def test_project_seed_path_cannot_escape_the_repository(tmp_path: Path) -> None:
 
     with pytest.raises(PermissionError, match="seed path"):
         runner.run(
-            project(repo, job_seed_paths=("../outside",)),
+            project(repo, seed_paths=("../outside",)),
             job_id="0818-seed-escape",
             argv=("./build-artifact",),
         )

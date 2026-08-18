@@ -43,6 +43,11 @@ class MemoryState:
 class FakeWorktrees:
     active: ActiveWorktree | None = None
     completed: bool = False
+    reseeded: int = 0
+
+    def ensure_seeded(self, active: ActiveWorktree) -> None:
+        assert active == self.active
+        self.reseeded += 1
 
     def begin(self, project: Project, task_id: str) -> ActiveWorktree:
         self.active = ActiveWorktree(
@@ -689,6 +694,57 @@ def test_codex_change_needing_input_keeps_worktree_and_resumes_same_thread() -> 
     assert codex.requests[1].thread_id == "write-thread"
     assert codex.requests[1].cwd == codex.requests[0].cwd
     assert completed["status"] == "merged"
+
+
+def test_codex_change_grants_project_readable_paths_to_codex() -> None:
+    worktrees = FakeWorktrees()
+    codex = FakeCodex(
+        [CodexRunResult("write-thread", "已经修改。", CodexTaskState.COMPLETED)],
+        [],
+    )
+    runtime = make_runtime(
+        worktrees=worktrees,
+        codex=codex,
+        projects=(
+            Project(
+                "vpp-digital-twin",
+                "VPP数字孪生项目",
+                Path("/Users/aventador/sourceCode/vpp-digital-twin"),
+                readable_paths=(Path("/opt/homebrew"), Path("/System/Cryptexes")),
+            ),
+        ),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    runtime.codex_change("修改模式高亮", "模式高亮")
+
+    request = codex.requests[0]
+    worktree_readable, _ = worktrees.codex_roots(worktrees.active)
+    assert request.readable_roots == (
+        *worktree_readable,
+        Path("/opt/homebrew"),
+        Path("/System/Cryptexes"),
+    )
+
+
+def test_codex_change_reseeds_a_resumed_worktree_before_starting_codex() -> None:
+    state = MemoryState()
+    worktrees = FakeWorktrees()
+    codex = FakeCodex(
+        [
+            CodexRunResult("write-thread", "请确认修改范围。", CodexTaskState.NEEDS_INPUT),
+            CodexRunResult("write-thread", "已经修改。", CodexTaskState.COMPLETED),
+        ],
+        [],
+    )
+    runtime = make_runtime(state=state, worktrees=worktrees, codex=codex)
+    runtime.select_project("aijd-demo")
+
+    runtime.codex_change("修复接口问题", "修复接口")
+    assert worktrees.reseeded == 0
+
+    runtime.codex_change("继续完成修改", "不会创建新任务")
+    assert worktrees.reseeded == 1
 
 
 def test_identity_mismatch_cannot_reuse_persisted_session_state() -> None:
