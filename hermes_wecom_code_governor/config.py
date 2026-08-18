@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -190,6 +191,41 @@ def _home_seeds(value: Any, field_name: str) -> tuple[tuple[Path, Path], ...]:
     return tuple(seeds)
 
 
+_RESERVED_JOB_ENV_NAMES = frozenset(
+    {
+        "HOME",
+        "PATH",
+        "TMPDIR",
+        "SHELL",
+        "USER",
+        "LOGNAME",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "npm_config_cache",
+        "ELECTRON_DISABLE_SANDBOX",
+    }
+)
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _job_environment(value: Any, field_name: str) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    data = _mapping(value, field_name)
+    entries: list[tuple[str, str]] = []
+    for name, raw_value in data.items():
+        if (
+            not isinstance(name, str)
+            or not _ENV_NAME.fullmatch(name)
+            or name in _RESERVED_JOB_ENV_NAMES
+        ):
+            raise ValueError(f"{field_name} contains a reserved or invalid variable name: {name}")
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            raise ValueError(f"{field_name}.{name} must be a non-empty string")
+        entries.append((name, raw_value))
+    return tuple(entries)
+
+
 def _parse_project(raw: Any, index: int) -> Project:
     data = _mapping(raw, f"projects[{index}]")
     prefix = f"projects[{index}]"
@@ -218,6 +254,8 @@ def _parse_project(raw: Any, index: int) -> Project:
         job_allowed_commands=_commands(
             job_data.get("allowed_commands"), f"{prefix}.job.allowed_commands"
         ),
+        job_gui_commands=_commands(job_data.get("gui_commands"), f"{prefix}.job.gui_commands"),
+        job_environment=_job_environment(job_data.get("environment"), f"{prefix}.job.environment"),
         job_artifact_globs=_relative_paths(
             job_data.get("artifact_globs"), f"{prefix}.job.artifact_globs"
         ),

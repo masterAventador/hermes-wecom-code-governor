@@ -47,6 +47,10 @@ projects:
       allowed_commands:
         - [npm, test]
         - [npm, run, '*']
+      gui_commands:
+        - [npm, run, 'qa:screenshot']
+      environment:
+        VPP_QA_USER_DATA: '${JOB_HOME}/Library/Application Support/vpp'
       artifact_globs:
         - release/*.exe
       timeout_seconds: 1800
@@ -85,6 +89,10 @@ permissions:
     assert vpp.base_branch is None
     assert vpp.validation_commands == (("npm", "test"),)
     assert vpp.job_allowed_commands == (("npm", "test"), ("npm", "run", "*"))
+    assert vpp.job_gui_commands == (("npm", "run", "qa:screenshot"),)
+    assert vpp.job_environment == (
+        ("VPP_QA_USER_DATA", "${JOB_HOME}/Library/Application Support/vpp"),
+    )
     assert vpp.job_artifact_globs == ("release/*.exe",)
     assert vpp.job_timeout_seconds == 1800
     assert vpp.seed_paths == ("node_modules",)
@@ -93,6 +101,35 @@ permissions:
     )
     assert vpp.readable_paths == (Path("/opt/homebrew"), Path("/System/Cryptexes"))
     assert vpp.job_unix_sockets == (Path("/private/var/run/mDNSResponder"),)
+
+
+@pytest.mark.parametrize("reserved", ["HOME", "PATH", "npm_config_cache"])
+def test_job_environment_rejects_reserved_variable_names(tmp_path: Path, reserved: str) -> None:
+    config_path = tmp_path / "governor.yaml"
+    config_path.write_text(
+        f"""
+version: 1
+runtime_root: /runtime/hermes-governor
+projects:
+  - id: vpp
+    name: VPP数字孪生项目
+    path: /workspace/sourceCode/vpp-digital-twin
+    job:
+      allowed_commands:
+        - [npm, test]
+      environment:
+        {reserved}: /evil
+permissions:
+  - name: owner
+    users: [owner]
+    chats: ['*']
+    projects: ['*']
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="environment"):
+        load_governor_config(config_path)
 
 
 @pytest.mark.parametrize("legacy_key", ["seed_paths", "readable_paths"])

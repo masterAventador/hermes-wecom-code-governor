@@ -9,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 
 from .policy import Project
+from .sandbox_profile import build_seatbelt_profile
 from .seeding import require_safe_seed_paths, seed_workspace
 
 _SAFE_TASK_ID = re.compile(r"^[\w.-]+$")
@@ -233,29 +234,9 @@ class WorktreeManager:
         isolated_home.mkdir(parents=True, exist_ok=True)
         isolated_tmp.mkdir(parents=True, exist_ok=True)
 
-        def sbpl(path: Path) -> str:
-            return str(path.resolve()).replace("\\", "\\\\").replace('"', '\\"')
-
-        real_home = Path.home().resolve()
-        profile = "\n".join(
-            (
-                "(version 1)",
-                "(allow default)",
-                "(deny network*)",
-                # 校验里的测试常需要本机回环端口（临时 MQTT broker、本地测试服务），
-                # 只放行本地监听和到 localhost 的出站，外部网络仍然全部拒绝。
-                '(allow network-bind network-inbound (local ip "*:*"))',
-                '(allow network-outbound (remote ip "localhost:*"))',
-                "(deny file-write*)",
-                '(allow file-write* (literal "/dev/null"))',
-                f'(allow file-write* (subpath "{sbpl(active.path)}"))',
-                f'(allow file-write* (subpath "{sbpl(validation_root)}"))',
-                f'(deny file-read* (subpath "{sbpl(real_home / ".ssh")}"))',
-                f'(deny file-read* (subpath "{sbpl(real_home / ".aws")}"))',
-                f'(deny file-read* (subpath "{sbpl(real_home / ".codex")}"))',
-                f'(deny file-read* (subpath "{sbpl(real_home / ".hermes")}"))',
-                f'(deny file-read* (subpath "{sbpl(real_home / "Library/Keychains")}"))',
-            )
+        profile = build_seatbelt_profile(
+            (active.path, validation_root),
+            (self.runtime_root.parent / "hermes-home",),
         )
         environment = {
             key: value

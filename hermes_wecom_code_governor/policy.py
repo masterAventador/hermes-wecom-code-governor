@@ -21,6 +21,8 @@ class Project:
     seed_paths: tuple[str, ...] = ()
     readable_paths: tuple[Path, ...] = ()
     job_allowed_commands: tuple[tuple[str, ...], ...] = ()
+    job_gui_commands: tuple[tuple[str, ...], ...] = ()
+    job_environment: tuple[tuple[str, str], ...] = ()
     job_artifact_globs: tuple[str, ...] = ()
     job_timeout_seconds: int = 1800
     job_home_seeds: tuple[tuple[Path, Path], ...] = ()

@@ -13,6 +13,7 @@ from hermes_wecom_code_governor.project_job import (
     JobExecutionRequest,
     JobExecutionResult,
     ProjectJobRunner,
+    SeatbeltGuiExecutor,
 )
 
 
@@ -97,6 +98,102 @@ def test_job_runs_in_detached_worktree_stages_artifact_and_removes_workspace(
     assert (repo / "README.md").read_text(encoding="utf-8") == "original\n"
     assert git(repo, "rev-parse", "main") == original_commit
     assert git(repo, "worktree", "list", "--porcelain").count("worktree ") == 1
+
+
+def test_gui_marked_commands_run_on_the_gui_executor_only(tmp_path: Path) -> None:
+    repo = create_repo(tmp_path)
+    default_executor = FakeExecutor()
+    gui_executor = FakeExecutor()
+    runner = ProjectJobRunner(
+        tmp_path / "runtime",
+        executor=default_executor,
+        gui_executor=gui_executor,
+    )
+    configured = project(repo, job_gui_commands=(("./build-artifact",),))
+
+    result = runner.run(configured, job_id="0818-gui", argv=("./build-artifact",))
+
+    assert result.status == "completed"
+    assert len(gui_executor.requests) == 1
+    assert default_executor.requests == []
+
+
+def test_seatbelt_gui_executor_confines_writes_and_network_but_allows_gui(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    temporary = tmp_path / "tmp"
+    for path in (workspace, home, temporary):
+        path.mkdir()
+    secret_dir = tmp_path / "hermes-home"
+    executor = SeatbeltGuiExecutor(denied_read_paths=(secret_dir,))
+    request = JobExecutionRequest(
+        cwd=workspace,
+        home=home,
+        temporary=temporary,
+        argv=("npm", "run", "qa:screenshot"),
+        timeout_seconds=120,
+    )
+
+    command = executor.build_command(request)
+
+    assert command[0].endswith("sandbox-exec")
+    profile = command[command.index("-p") + 1]
+    assert "(allow default)" in profile
+    assert "(deny network*)" in profile
+    assert '(allow network-bind network-inbound (local ip "*:*"))' in profile
+    assert '(allow network-outbound (remote ip "localhost:*"))' in profile
+    assert "(deny file-write*)" in profile
+    for writable in (workspace, home, temporary):
+        assert f'(allow file-write* (subpath "{writable.resolve()}"))' in profile
+    for denied in (Path.home() / ".ssh", Path.home() / ".hermes", secret_dir):
+        assert f'(deny file-read* (subpath "{denied.resolve()}"))' in profile
+    assert command[-3:] == ("npm", "run", "qa:screenshot")
+
+    environment = executor.build_environment(request, {"PATH": "/usr/bin:/bin"})
+    assert environment["ELECTRON_DISABLE_SANDBOX"] == "1"
+    assert environment["HOME"] == str(home.resolve())
+
+
+def test_project_environment_reaches_executor_with_job_home_resolved(tmp_path: Path) -> None:
+    repo = create_repo(tmp_path)
+    executor = FakeExecutor()
+    runtime_root = tmp_path / "runtime"
+    runner = ProjectJobRunner(runtime_root, executor=executor, gui_executor=FakeExecutor())
+    configured = project(
+        repo,
+        job_environment=(("VPP_QA_USER_DATA", "${JOB_HOME}/Library/App Support/vpp"),),
+    )
+
+    runner.run(configured, job_id="0818-env", argv=("./build-artifact",))
+
+    request = executor.requests[0]
+    expected_home = runtime_root / "jobs" / "demo" / "0818-env" / "home"
+    assert request.environment == (
+        ("VPP_QA_USER_DATA", f"{expected_home.resolve()}/Library/App Support/vpp"),
+    )
+
+
+def test_request_environment_cannot_override_managed_isolation_keys(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    temporary = tmp_path / "tmp"
+    for path in (workspace, home, temporary):
+        path.mkdir()
+    request = JobExecutionRequest(
+        cwd=workspace,
+        home=home,
+        temporary=temporary,
+        argv=("npm", "test"),
+        timeout_seconds=60,
+        environment=(("CUSTOM_FLAG", "on"), ("HOME", "/evil")),
+    )
+
+    environment = CodexSandboxExecutor.build_environment(request, {"PATH": "/usr/bin:/bin"})
+
+    assert environment["CUSTOM_FLAG"] == "on"
+    assert environment["HOME"] == str(home.resolve())
 
 
 @pytest.mark.parametrize(
@@ -193,6 +290,10 @@ def test_executor_uses_minimal_read_access_exact_write_roots_and_sanitized_env(
     )
     monkeypatch.setenv("WECOM_SECRET", "must-not-leak")
     monkeypatch.setenv("COS_SECRET_KEY", "must-not-leak")
+    monkeypatch.setenv(
+        "PATH",
+        f"{Path.home()}/fvm/default/bin:/opt/homebrew/bin:/usr/bin:/bin",
+    )
     executor = CodexSandboxExecutor(Path("/opt/homebrew/bin/codex"))
 
     environment = executor.build_environment(request, os.environ)
@@ -203,6 +304,9 @@ def test_executor_uses_minimal_read_access_exact_write_roots_and_sanitized_env(
     assert "COS_SECRET_KEY" not in environment
     assert environment["HOME"] == str(home)
     assert environment["TMPDIR"] == str(temporary)
+    # 沙箱拒读真实 HOME 下的目录；PATH 里指向 HOME 的条目会让 execvp 型
+    # 查找（如 npm 找 sh）拿到 EPERM 直接失败，必须在进沙箱前剔除。
+    assert environment["PATH"] == "/opt/homebrew/bin:/usr/bin:/bin"
     assert state["sandboxPolicy"] == {"type": "read-only"}
     entries = state["permissionProfile"]["file_system"]["entries"]
     assert entries[0] == {

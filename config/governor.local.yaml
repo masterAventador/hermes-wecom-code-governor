@@ -44,14 +44,22 @@ projects:
       allowed_commands:
         - [npm, test]
         - [npm, run, "build:win", "--", "--config.electronDownload.isVerifyChecksum=false"]
+        - [npm, run, "qa:screenshot"]
+      gui_commands:
+        - [npm, run, "qa:screenshot"]
+      environment:
+        VPP_QA_USER_DATA: "${JOB_HOME}/Library/Application Support/vpp-digital-twin"
       artifact_globs:
         - release/*.exe
+        - qa-artifacts/screenshots/*.png
       timeout_seconds: 1800
       home_seeds:
         - source: /Users/aventador/Library/Caches/electron
           target: Library/Caches/electron
         - source: /Users/aventador/Library/Caches/electron-builder
           target: Library/Caches/electron-builder
+        - source: "/Users/aventador/Library/Application Support/vpp-digital-twin/licensing.json"
+          target: "Library/Application Support/vpp-digital-twin/licensing.json"
       unix_sockets:
         - /private/var/run/mDNSResponder
 

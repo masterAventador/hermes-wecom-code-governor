@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from .policy import Project
+from .sandbox_profile import build_seatbelt_profile
 from .seeding import copy_seed, require_safe_seed_paths, seed_workspace
 
 _SAFE_JOB_ID = re.compile(r"^[\w.-]+$")
@@ -42,6 +43,7 @@ class JobExecutionRequest:
     timeout_seconds: int
     readable_paths: tuple[Path, ...] = ()
     unix_sockets: tuple[Path, ...] = ()
+    environment: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,17 @@ class CodexSandboxExecutor:
         inherited: Mapping[str, str],
     ) -> dict[str, str]:
         environment = {key: value for key, value in inherited.items() if key in _ENV_ALLOWLIST}
+        # 沙箱拒读真实 HOME 下的目录；PATH 里指向 HOME 的条目会让 execvp 型
+        # 查找（如 npm 解析 sh）拿到 EPERM 直接失败，进沙箱前必须剔除。
+        real_home = Path.home()
+        environment["PATH"] = ":".join(
+            entry
+            for entry in inherited.get("PATH", "").split(":")
+            if entry and not Path(entry).is_relative_to(real_home)
+        )
+        # 项目登记的任务环境变量先并入；随后受管的隔离键再覆盖，
+        # 保证配置无法劫持 HOME/TMPDIR 等隔离边界。
+        environment.update(dict(request.environment))
         environment.update(
             {
                 "HOME": str(request.home.resolve()),
@@ -141,26 +154,85 @@ class CodexSandboxExecutor:
         )
 
     def run(self, request: JobExecutionRequest) -> JobExecutionResult:
-        environment = self.build_environment(request, os.environ)
-        command = self.build_command(request)
-        process = subprocess.Popen(
-            command,
-            cwd=request.cwd,
-            env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
+        return _run_confined(
+            self.build_command(request),
+            request,
+            self.build_environment(request, os.environ),
         )
-        try:
-            stdout, stderr = process.communicate(timeout=request.timeout_seconds)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate()
-            timeout_message = f"command timed out after {request.timeout_seconds} seconds"
-            stderr = f"{stderr.rstrip()}\n{timeout_message}".strip()
-            return JobExecutionResult(124, stdout, stderr)
-        return JobExecutionResult(process.returncode, stdout, stderr)
+
+
+class SeatbeltGuiExecutor:
+    """GUI 类任务执行器：codex sandbox 无法放行 WindowServer 等图形服务，
+    这里用共享的 seatbelt profile（默认放行 + 定点收紧）承接需要拉起
+    窗口进程的受控任务（如 Electron 静默截图）。"""
+
+    def __init__(self, denied_read_paths: tuple[Path, ...] = ()) -> None:
+        sandbox_exec = shutil.which("sandbox-exec")
+        if sandbox_exec is None:
+            raise RuntimeError("sandbox-exec is required for governed GUI jobs")
+        self._sandbox_exec = sandbox_exec
+        self._denied_read_paths = denied_read_paths
+
+    def build_command(self, request: JobExecutionRequest) -> tuple[str, ...]:
+        profile = build_seatbelt_profile(
+            (request.cwd, request.home, request.temporary),
+            self._denied_read_paths,
+        )
+        return (self._sandbox_exec, "-p", profile, *request.argv)
+
+    @staticmethod
+    def build_environment(
+        request: JobExecutionRequest,
+        inherited: Mapping[str, str],
+    ) -> dict[str, str]:
+        environment = CodexSandboxExecutor.build_environment(request, inherited)
+        # 外层 seatbelt 已提供隔离；嵌套沙箱会让 Chromium 自身的沙箱
+        # 初始化失败（Operation not permitted），必须显式关闭内层沙箱。
+        environment["ELECTRON_DISABLE_SANDBOX"] = "1"
+        return environment
+
+    def run(self, request: JobExecutionRequest) -> JobExecutionResult:
+        return _run_confined(
+            self.build_command(request),
+            request,
+            self.build_environment(request, os.environ),
+        )
+
+
+def _matches_any(patterns: tuple[tuple[str, ...], ...], argv: tuple[str, ...]) -> bool:
+    return any(
+        len(pattern) == len(argv)
+        and all(
+            expected == "*" or expected == actual
+            for expected, actual in zip(pattern, argv, strict=True)
+        )
+        for pattern in patterns
+    )
+
+
+def _run_confined(
+    command: tuple[str, ...],
+    request: JobExecutionRequest,
+    environment: dict[str, str],
+) -> JobExecutionResult:
+    process = subprocess.Popen(
+        command,
+        cwd=request.cwd,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=request.timeout_seconds)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = process.communicate()
+        timeout_message = f"command timed out after {request.timeout_seconds} seconds"
+        stderr = f"{stderr.rstrip()}\n{timeout_message}".strip()
+        return JobExecutionResult(124, stdout, stderr)
+    return JobExecutionResult(process.returncode, stdout, stderr)
 
 
 class ProjectJobRunner:
@@ -169,6 +241,7 @@ class ProjectJobRunner:
         runtime_root: Path,
         *,
         executor: JobExecutor | None = None,
+        gui_executor: JobExecutor | None = None,
         codex_binary: Path | None = None,
     ) -> None:
         self.runtime_root = runtime_root.resolve()
@@ -182,6 +255,11 @@ class ProjectJobRunner:
                 binary = codex_binary
             executor = CodexSandboxExecutor(binary)
         self._executor = executor
+        if gui_executor is None:
+            gui_executor = SeatbeltGuiExecutor(
+                denied_read_paths=(self.runtime_root.parent / "hermes-home",)
+            )
+        self._gui_executor = gui_executor
 
     def run(
         self,
@@ -209,9 +287,12 @@ class ProjectJobRunner:
         self._git(repo, "worktree", "add", "--detach", str(workspace), base_branch)
         home.mkdir(parents=True)
         temporary.mkdir(parents=True)
+        executor = (
+            self._gui_executor if _matches_any(project.job_gui_commands, argv) else self._executor
+        )
         try:
             self._seed_job(project, workspace, home)
-            execution = self._executor.run(
+            execution = executor.run(
                 JobExecutionRequest(
                     cwd=workspace,
                     home=home,
@@ -220,6 +301,7 @@ class ProjectJobRunner:
                     timeout_seconds=project.job_timeout_seconds,
                     readable_paths=project.readable_paths,
                     unix_sockets=project.job_unix_sockets,
+                    environment=self._resolved_environment(project, workspace, home),
                 )
             )
             output = self._combined_output(execution)
@@ -242,6 +324,22 @@ class ProjectJobRunner:
         finally:
             self._remove_worktree(repo, workspace)
             shutil.rmtree(job_root, ignore_errors=True)
+
+    @staticmethod
+    def _resolved_environment(
+        project: Project,
+        workspace: Path,
+        home: Path,
+    ) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (
+                name,
+                template.replace("${JOB_HOME}", str(home.resolve())).replace(
+                    "${WORKSPACE}", str(workspace.resolve())
+                ),
+            )
+            for name, template in project.job_environment
+        )
 
     @staticmethod
     def _combined_output(result: JobExecutionResult) -> str:
@@ -292,15 +390,7 @@ class ProjectJobRunner:
             raise ValueError("job id may only contain letters, numbers, dot, dash and underscore")
         if not argv or not all(isinstance(token, str) and token for token in argv):
             raise ValueError("job command must be a non-empty argv")
-        allowed = any(
-            len(pattern) == len(argv)
-            and all(
-                expected == "*" or expected == actual
-                for expected, actual in zip(pattern, argv, strict=True)
-            )
-            for pattern in project.job_allowed_commands
-        )
-        if not allowed:
+        if not _matches_any(project.job_allowed_commands, argv):
             raise PermissionError("command is not allowed for this project")
         allowed_globs = set(project.job_artifact_globs)
         for pattern in artifact_globs:

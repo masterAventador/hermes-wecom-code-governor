@@ -41,8 +41,20 @@ def test_local_governor_config_contains_known_projects_and_no_secrets() -> None:
             "--",
             "--config.electronDownload.isVerifyChecksum=false",
         ),
+        ("npm", "run", "qa:screenshot"),
     )
-    assert vpp.job_artifact_globs == ("release/*.exe",)
+    assert vpp.job_gui_commands == (("npm", "run", "qa:screenshot"),)
+    assert vpp.job_environment == (
+        (
+            "VPP_QA_USER_DATA",
+            "${JOB_HOME}/Library/Application Support/vpp-digital-twin",
+        ),
+    )
+    assert vpp.job_artifact_globs == ("release/*.exe", "qa-artifacts/screenshots/*.png")
+    assert (
+        Path("/Users/aventador/Library/Application Support/vpp-digital-twin/licensing.json"),
+        Path("Library/Application Support/vpp-digital-twin/licensing.json"),
+    ) in vpp.job_home_seeds
     assert vpp.seed_paths == ("node_modules",)
     assert vpp.readable_paths == (
         Path("/opt/homebrew"),
