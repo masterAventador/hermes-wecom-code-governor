@@ -97,6 +97,10 @@ def test_hermes_config_patch_pins_subscription_model_and_plugin() -> None:
     assert data["timeouts"]["tools"]["concurrent_batch"] == 7200
     assert data["model"].get("openai_runtime", "auto") == "auto"
     assert "hermes-wecom-code-governor" in data["plugins"]["enabled"]
+    # 路由层只认顶层开关；extra 里的同名开关只影响适配器合批，两处必须一致。
+    assert data["group_sessions_per_user"] is False
+    # 本机 Fake-IP 代理环境下必须放行私网解析，否则企微图片下载全被 SSRF 拦截。
+    assert data["security"]["allow_private_urls"] is True
     assert data["gateway"]["platforms"]["wecom"]["extra"]["group_sessions_per_user"] is False
     assert "secret" not in data["gateway"]["platforms"]["wecom"]["extra"]
 
