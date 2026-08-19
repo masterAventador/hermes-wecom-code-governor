@@ -30,6 +30,12 @@ App Server permission profile 和企微项目卡片。Codex App Server 只负责
 permission profile。模型不能自行扩大项目范围，也不能把任意命令声明成“打包”或“部署”来
 绕过配置。任务命令和允许交付的产物规则只能来自管理员维护的项目配置。
 
+远程受控动作（`governor_remote_task`）是唯一跨出本机沙箱、直接出网并使用本机 SSH 私钥的
+路径，因此单独收敛：目标主机与命令 argv 完全来自项目配置的 `remote_actions`，模型只能按
+登记名称触发、无法拼接主机或命令。执行强制 `BatchMode=yes` + `StrictHostKeyChecking=yes`，
+清空子进程环境仅保留 PATH（机器人密钥不外传），并受命令级超时约束。触发受同一套授权约束
+（授权身份 + 已选项目 + 无活动改码任务），每次执行前后写入含触发者身份的审计日志。
+
 ## 文件交付
 
 模型只有在用户明确要求发送当前项目中的既有文件时，才能调用 `governor_deliver_file`。
@@ -49,11 +55,13 @@ permission profile。模型不能自行扩大项目范围，也不能把任意�
 2. 已选项目：外层 Hermes 使用结构化只读工具直接检查项目，不启动第二层 Agent。
 3. 需要执行非修改任务：`governor_project_job` 创建一次性 detached worktree，在 Codex 沙箱中
    运行精确匹配的管理员命令，完成后暂存允许的产物并删除 worktree；不启动内层 Agent。
-4. 需要修改：`governor_codex_change` 创建 worktree，以写权限组启动或恢复任务线程。
-5. Codex 返回 `needs_input`：保留 worktree 和 thread，等待用户后续消息。
-6. Codex 返回 `completed`：脚本检查变更范围、运行验证、提交并快进合并到基准分支。
-7. 验证成功：清理 worktree 和任务分支。
-8. 验证或合并失败：保留 worktree 和 thread，禁止宣称已经合并。
+4. 需要触发远程受控动作：`governor_remote_task` 按登记名称 ssh 到固定主机执行固定命令，
+   取回截断后的输出；不创建 worktree、不启动内层 Agent，活动改码任务存在时拒绝执行。
+5. 需要修改：`governor_codex_change` 创建 worktree，以写权限组启动或恢复任务线程。
+6. Codex 返回 `needs_input`：保留 worktree 和 thread，等待用户后续消息。
+7. Codex 返回 `completed`：脚本检查变更范围、运行验证、提交并快进合并到基准分支。
+8. 验证成功：清理 worktree 和任务分支。
+9. 验证或合并失败：保留 worktree 和 thread，禁止宣称已经合并。
 
 ## Codex 原生执行路线
 

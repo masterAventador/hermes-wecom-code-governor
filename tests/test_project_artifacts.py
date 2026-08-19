@@ -4,7 +4,7 @@ import pytest
 import yaml
 
 from hermes_wecom_code_governor.config import load_governor_config
-from hermes_wecom_code_governor.policy import Identity
+from hermes_wecom_code_governor.policy import Identity, RemoteAction
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -50,6 +50,14 @@ def test_local_governor_config_contains_known_projects_and_no_secrets() -> None:
     assert config.codex.model == "gpt-5.6-sol"
     assert config.codex.reasoning_effort == "xhigh"
     vpp = config.policy.project("vpp-digital-twin")
+    assert vpp.remote_actions == (
+        RemoteAction(
+            name="生成激活码",
+            host="vpp-license",
+            argv=("/usr/local/bin/node", "/opt/vpp-license/issue-code.mjs"),
+            timeout_seconds=30,
+        ),
+    )
     assert vpp.job_allowed_commands == (
         ("npm", "test"),
         (
@@ -138,6 +146,7 @@ def test_plugin_manifest_declares_hooks_and_tools() -> None:
         "governor_project_git",
         "governor_codex_change",
         "governor_project_job",
+        "governor_remote_task",
         "governor_deliver_file",
     }
 

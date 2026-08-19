@@ -34,6 +34,13 @@ projects:
     base_branch: main
     validation_commands:
       - [npm, test]
+    remote_actions:
+      # 授权服务器上生成一个新的 unused 激活码；主机与命令固定，机器人只能按名触发。
+      # host 用 ~/.ssh/config 里的别名 vpp-license，真实地址与账户不入库。
+      - name: 生成激活码
+        host: vpp-license
+        argv: [/usr/local/bin/node, /opt/vpp-license/issue-code.mjs]
+        timeout_seconds: 30
     seed_paths:
       - node_modules
     readable_paths:

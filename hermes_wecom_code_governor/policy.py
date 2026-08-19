@@ -12,6 +12,16 @@ class Identity:
 
 
 @dataclass(frozen=True)
+class RemoteAction:
+    """预登记的远程动作：固定 ssh 主机 + 固定命令，模型只能按名称触发。"""
+
+    name: str
+    host: str
+    argv: tuple[str, ...]
+    timeout_seconds: int = 30
+
+
+@dataclass(frozen=True)
 class Project:
     project_id: str
     display_name: str
@@ -27,6 +37,7 @@ class Project:
     job_timeout_seconds: int = 1800
     job_home_seeds: tuple[tuple[Path, Path], ...] = ()
     job_unix_sockets: tuple[Path, ...] = ()
+    remote_actions: tuple[RemoteAction, ...] = ()
     auto_discovered: bool = False
 
 

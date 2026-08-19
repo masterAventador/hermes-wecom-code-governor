@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from hermes_wecom_code_governor.config import load_governor_config
-from hermes_wecom_code_governor.policy import Identity
+from hermes_wecom_code_governor.policy import Identity, RemoteAction
 
 
 def test_loads_projects_permissions_commands_and_safety_settings(tmp_path: Path) -> None:
@@ -43,6 +43,11 @@ projects:
     readable_paths:
       - /opt/homebrew
       - /System/Cryptexes
+    remote_actions:
+      - name: 生成激活码
+        host: root@license.example
+        argv: [node, /opt/vpp-license/issue.mjs]
+        timeout_seconds: 45
     job:
       allowed_commands:
         - [npm, test]
@@ -92,6 +97,14 @@ permissions:
     assert vpp.job_gui_commands == (("npm", "run", "qa:screenshot"),)
     assert vpp.job_environment == (
         ("VPP_QA_USER_DATA", "${JOB_HOME}/Library/Application Support/vpp"),
+    )
+    assert vpp.remote_actions == (
+        RemoteAction(
+            name="生成激活码",
+            host="root@license.example",
+            argv=("node", "/opt/vpp-license/issue.mjs"),
+            timeout_seconds=45,
+        ),
     )
     assert vpp.job_artifact_globs == ("release/*.exe",)
     assert vpp.job_timeout_seconds == 1800

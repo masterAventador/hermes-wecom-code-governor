@@ -11,12 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
+from .execution import TIMEOUT_EXIT_CODE, combine_output
 from .policy import Project
 from .sandbox_profile import build_seatbelt_profile
 from .seeding import copy_seed, require_safe_seed_paths, seed_workspace
 
 _SAFE_JOB_ID = re.compile(r"^[\w.-]+$")
-_MAX_JOB_OUTPUT_CHARS = 12_000
 _ENV_ALLOWLIST = frozenset(
     {
         "PATH",
@@ -231,7 +231,7 @@ def _run_confined(
         stdout, stderr = process.communicate()
         timeout_message = f"command timed out after {request.timeout_seconds} seconds"
         stderr = f"{stderr.rstrip()}\n{timeout_message}".strip()
-        return JobExecutionResult(124, stdout, stderr)
+        return JobExecutionResult(TIMEOUT_EXIT_CODE, stdout, stderr)
     return JobExecutionResult(process.returncode, stdout, stderr)
 
 
@@ -304,7 +304,7 @@ class ProjectJobRunner:
                     environment=self._resolved_environment(project, workspace, home),
                 )
             )
-            output = self._combined_output(execution)
+            output = combine_output(execution.stdout, execution.stderr)
             if execution.exit_code != 0:
                 return ProjectJobResult(
                     status="failed",
@@ -340,14 +340,6 @@ class ProjectJobRunner:
             )
             for name, template in project.job_environment
         )
-
-    @staticmethod
-    def _combined_output(result: JobExecutionResult) -> str:
-        output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
-        if len(output) <= _MAX_JOB_OUTPUT_CHARS:
-            return output
-        omitted = len(output) - _MAX_JOB_OUTPUT_CHARS
-        return f"[前面 {omitted} 个字符已省略]\n{output[-_MAX_JOB_OUTPUT_CHARS:]}"
 
     def _stage_artifacts(
         self,

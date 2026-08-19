@@ -103,6 +103,7 @@ def test_registers_governance_hooks_and_model_tools() -> None:
         "governor_project_git",
         "governor_codex_change",
         "governor_project_job",
+        "governor_remote_task",
         "governor_deliver_file",
     }
     assert call_tool(ctx.tools["governor_list_projects"], {"query": "vpp", "limit": 6}) == {

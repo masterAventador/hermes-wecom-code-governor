@@ -11,7 +11,7 @@ import yaml
 from .codex_runtime import CodexRuntimeSettings
 from .delivery import WECOM_FILE_MAX_BYTES, CosDeliveryConfig, DeliveryConfig
 from .discovery import discover_git_repositories
-from .policy import PermissionGroup, Policy, Project
+from .policy import PermissionGroup, Policy, Project, RemoteAction
 
 
 @dataclass(frozen=True)
@@ -226,6 +226,29 @@ def _job_environment(value: Any, field_name: str) -> tuple[tuple[str, str], ...]
     return tuple(entries)
 
 
+def _remote_actions(value: Any, field_name: str) -> tuple[RemoteAction, ...]:
+    if value is None:
+        return ()
+    actions: list[RemoteAction] = []
+    for index, raw_action in enumerate(_list(value, field_name)):
+        prefix = f"{field_name}[{index}]"
+        data = _mapping(raw_action, prefix)
+        actions.append(
+            RemoteAction(
+                name=_required_string(data, "name", f"{prefix}.name"),
+                host=_required_string(data, "host", f"{prefix}.host"),
+                argv=_argv(data.get("argv"), f"{prefix}.argv"),
+                timeout_seconds=_positive_int_field(
+                    data.get("timeout_seconds", 30), f"{prefix}.timeout_seconds"
+                ),
+            )
+        )
+    names = [action.name for action in actions]
+    if len(set(names)) != len(names):
+        raise ValueError(f"{field_name} contains duplicate action names")
+    return tuple(actions)
+
+
 def _parse_project(raw: Any, index: int) -> Project:
     data = _mapping(raw, f"projects[{index}]")
     prefix = f"projects[{index}]"
@@ -268,6 +291,7 @@ def _parse_project(raw: Any, index: int) -> Project:
             else 1800
         ),
         job_home_seeds=_home_seeds(job_data.get("home_seeds"), f"{prefix}.job.home_seeds"),
+        remote_actions=_remote_actions(data.get("remote_actions"), f"{prefix}.remote_actions"),
         job_unix_sockets=tuple(
             _absolute_path(value, f"{prefix}.job.unix_sockets[{socket_index}]")
             for socket_index, value in enumerate(

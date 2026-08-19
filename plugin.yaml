@@ -22,6 +22,7 @@ provides_tools:
   - governor_project_git
   - governor_codex_change
   - governor_project_job
+  - governor_remote_task
   - governor_deliver_file
 python_dependencies:
   - PyYAML>=6.0,<7

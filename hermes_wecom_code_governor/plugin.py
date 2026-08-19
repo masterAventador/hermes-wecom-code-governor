@@ -277,6 +277,19 @@ def register_runtime_components(ctx: Any, runtime: GovernorRuntime | Any) -> Non
             ),
         ),
         (
+            "governor_remote_task",
+            "触发当前项目预先登记的远程受控动作；只能按上下文清单里的登记名称触发，"
+            "目标主机与命令均固定，不接受自定义命令。",
+            {
+                "action": {
+                    "type": "string",
+                    "description": "当前项目 remote_actions 中登记的动作名称",
+                }
+            },
+            ["action"],
+            lambda args: runtime.remote_task(_required_text(args, "action")),
+        ),
+        (
             "governor_deliver_file",
             "仅在用户明确要求时，交付当前已选项目内的现有文件；小文件发企微，大文件发腾讯云临时链接。",
             {

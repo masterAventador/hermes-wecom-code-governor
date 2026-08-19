@@ -18,8 +18,15 @@ from hermes_wecom_code_governor.config import (
 )
 from hermes_wecom_code_governor.delivery import ArtifactDelivery
 from hermes_wecom_code_governor.discovery import discover_git_repositories
-from hermes_wecom_code_governor.policy import Identity, PermissionGroup, Policy, Project
+from hermes_wecom_code_governor.policy import (
+    Identity,
+    PermissionGroup,
+    Policy,
+    Project,
+    RemoteAction,
+)
 from hermes_wecom_code_governor.project_job import ProjectJobResult
+from hermes_wecom_code_governor.remote import RemoteRunResult
 from hermes_wecom_code_governor.runtime import GovernorRuntime, SessionEnvironment, build_task_id
 from hermes_wecom_code_governor.worktree import (
     ActiveWorktree,
@@ -116,6 +123,20 @@ class FakeJobs:
         return self.result
 
 
+@dataclass
+class FakeRemote:
+    stdout: str = "VPP-AAAA-BBBB-CCCC"
+    exit_code: int = 0
+    stderr: str = ""
+
+    def __post_init__(self) -> None:
+        self.calls: list[RemoteAction] = []
+
+    def run(self, action: RemoteAction) -> RemoteRunResult:
+        self.calls.append(action)
+        return RemoteRunResult(self.exit_code, self.stdout, self.stderr)
+
+
 class FakeInspector:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Project, dict]] = []
@@ -148,6 +169,7 @@ def make_runtime(
     inspector: FakeInspector | None = None,
     notifier: object | None = None,
     projects: tuple[Project, ...] | None = None,
+    remote: FakeRemote | None = None,
 ) -> GovernorRuntime:
     configured_projects = projects or (
         Project("aijd-demo", "AIJD测试项目", Path("/Users/aventador/sourceCode/bjx/aijd-demo")),
@@ -185,6 +207,7 @@ def make_runtime(
         jobs=jobs,
         inspector=inspector,
         notifier=notifier,
+        remote=remote,
         now=lambda: (8, 17),
     )
 
@@ -302,6 +325,7 @@ def test_prompt_context_describes_identity_flexible_project_choice_and_current_s
     assert "governor_codex_read" not in context
     assert "governor_codex_change" in context
     assert "governor_deliver_file" in context
+    assert "governor_remote_task" in context
     assert "governor_project_job" in context
     assert "只有修改代码才调用 governor_codex_change" in context
     assert "打包、测试、导出" in context
@@ -581,6 +605,135 @@ def test_project_job_runs_without_inner_codex_and_queues_generated_artifact(
     assert staging_root == artifact.parent
     assert message_id == "message-1"
     assert runtime.take_pending_delivery("message-1") == delivery_result
+
+
+def _remote_project() -> Project:
+    return Project(
+        "vpp-digital-twin",
+        "VPP数字孪生项目",
+        Path("/Users/aventador/sourceCode/vpp-digital-twin"),
+        remote_actions=(
+            RemoteAction(
+                name="生成激活码",
+                host="root@license.example",
+                argv=("node", "/opt/vpp-license/issue.mjs"),
+                timeout_seconds=45,
+            ),
+        ),
+    )
+
+
+def test_prompt_context_lists_registered_remote_action_names_after_selection() -> None:
+    runtime = make_runtime(projects=(_remote_project(),))
+    runtime.select_project("vpp-digital-twin")
+
+    context = runtime.pre_llm_call()["context"]
+
+    assert "当前项目可触发的远程受控动作" in context
+    assert "- 生成激活码" in context
+
+
+def test_remote_task_runs_named_action_and_returns_output() -> None:
+    remote = FakeRemote(stdout="VPP-5QH2-34MZ-HRRU\n")
+    notices: list[str] = []
+    runtime = make_runtime(
+        projects=(_remote_project(),),
+        remote=remote,
+        notifier=lambda _identity, text: notices.append(text),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    result = runtime.remote_task("生成激活码")
+
+    assert result["status"] == "completed"
+    assert result["action"] == "生成激活码"
+    assert result["output"] == "VPP-5QH2-34MZ-HRRU"
+    assert [action.name for action in remote.calls] == ["生成激活码"]
+    assert notices == ["正在为 VPP数字孪生项目执行“生成激活码”，请稍候。"]
+
+
+def test_remote_task_rejects_an_unregistered_action_without_running() -> None:
+    remote = FakeRemote()
+    runtime = make_runtime(projects=(_remote_project(),), remote=remote)
+    runtime.select_project("vpp-digital-twin")
+
+    with pytest.raises(PermissionError, match="remote action is not registered"):
+        runtime.remote_task("删除数据库")
+
+    assert remote.calls == []
+
+
+def test_remote_task_reports_failure_output_when_command_exits_nonzero() -> None:
+    remote = FakeRemote(exit_code=255, stdout="", stderr="ssh: connect timed out")
+    runtime = make_runtime(projects=(_remote_project(),), remote=remote)
+    runtime.select_project("vpp-digital-twin")
+
+    result = runtime.remote_task("生成激活码")
+
+    assert result["status"] == "failed"
+    assert result["exit_code"] == 255
+    assert "connect timed out" in result["output"]
+
+
+def test_remote_task_success_output_ignores_ssh_stderr_warnings() -> None:
+    remote = FakeRemote(
+        exit_code=0,
+        stdout="VPP-CODE-1234\n",
+        stderr="Warning: Permanently added host to known hosts.",
+    )
+    runtime = make_runtime(projects=(_remote_project(),), remote=remote)
+    runtime.select_project("vpp-digital-twin")
+
+    result = runtime.remote_task("生成激活码")
+
+    assert result["output"] == "VPP-CODE-1234"
+
+
+def test_remote_task_truncates_flooding_output() -> None:
+    remote = FakeRemote(exit_code=1, stdout="", stderr="e" * 20_000)
+    runtime = make_runtime(projects=(_remote_project(),), remote=remote)
+    runtime.select_project("vpp-digital-twin")
+
+    result = runtime.remote_task("生成激活码")
+
+    assert len(str(result["output"])) < 13_000
+    assert "个字符已省略" in str(result["output"])
+
+
+def test_remote_task_is_blocked_while_a_code_task_is_active() -> None:
+    remote = FakeRemote()
+    worktrees = FakeWorktrees()
+    state = MemoryState()
+    codex = FakeCodex([CodexRunResult("write-thread", "请确认。", CodexTaskState.NEEDS_INPUT)], [])
+    runtime = make_runtime(
+        state=state,
+        projects=(_remote_project(),),
+        remote=remote,
+        worktrees=worktrees,
+        codex=codex,
+    )
+    runtime.select_project("vpp-digital-twin")
+    runtime.codex_change("改点东西", "改代码")
+
+    with pytest.raises(RuntimeError, match="finish the active code task"):
+        runtime.remote_task("生成激活码")
+
+    assert remote.calls == []
+
+
+def test_remote_task_writes_an_audit_line_with_identity(caplog: pytest.LogCaptureFixture) -> None:
+    remote = FakeRemote(stdout="VPP-CODE-9999\n")
+    runtime = make_runtime(projects=(_remote_project(),), remote=remote)
+    runtime.select_project("vpp-digital-twin")
+
+    with caplog.at_level("INFO", logger="hermes_wecom_code_governor.runtime"):
+        runtime.remote_task("生成激活码")
+
+    audit = [record for record in caplog.records if "remote action" in record.getMessage()]
+    assert audit
+    message = audit[0].getMessage()
+    assert "生成激活码" in message
+    assert "user-1" in message
 
 
 def test_artifact_job_fails_before_execution_when_delivery_is_not_configured(

@@ -10,6 +10,8 @@ group_sessions_per_user: false
 # 放行私网解析；云元数据地址（169.254.169.254 等）不受此开关影响、仍被硬拦。
 security:
   allow_private_urls: true
+logging:
+  level: INFO
 agent:
   reasoning_effort: medium
 timeouts:

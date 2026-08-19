@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from collections import defaultdict, deque
 from collections.abc import Callable
@@ -16,11 +17,14 @@ from .codex_runtime import (
 )
 from .config import GovernorConfig, build_project_catalog
 from .delivery import ArtifactDelivery, FileDeliveryService
+from .execution import combine_output
 from .policy import Identity, Policy, Project
 from .project_inspector import ProjectInspector
 from .project_job import ProjectJobRunner
 from .state import DurableState, SessionRecord, SessionStateRepository
 from .worktree import CompletionStatus, SafetyLimits, WorktreeManager
+
+logger = logging.getLogger(__name__)
 
 _SEPARATOR_RUN = re.compile(r"-+")
 _GOVERNOR_TOOLS = frozenset(
@@ -33,6 +37,7 @@ _GOVERNOR_TOOLS = frozenset(
         "governor_project_git",
         "governor_codex_change",
         "governor_project_job",
+        "governor_remote_task",
         "governor_deliver_file",
     }
 )
@@ -82,6 +87,7 @@ class GovernorRuntime:
         delivery: FileDeliveryService | Any | None = None,
         jobs: ProjectJobRunner | Any | None = None,
         inspector: ProjectInspector | Any | None = None,
+        remote: Any | None = None,
         notifier: Callable[[Identity, str], None] | None = None,
         now: Callable[[], tuple[int, int]] | None = None,
     ) -> None:
@@ -100,6 +106,11 @@ class GovernorRuntime:
             codex_binary=config.codex.codex_bin,
         )
         self._inspector = inspector or ProjectInspector()
+        if remote is None:
+            from .remote import SshRemoteRunner
+
+            remote = SshRemoteRunner()
+        self._remote = remote
         self._notifier = notifier
         self._pending_deliveries: dict[str, deque[ArtifactDelivery]] = defaultdict(deque)
         # 工具超时后外层会带同一条消息重试 codex_change；按 message_id 去重，
@@ -169,6 +180,7 @@ class GovernorRuntime:
                 f"任务：{record.active_worktree.task_id}。"
             )
         selected_job_lines: list[str] = []
+        selected_remote_lines: list[str] = []
         if record.project_id:
             selected_project = self._projects[record.project_id]
             selected_job_lines = [
@@ -176,6 +188,11 @@ class GovernorRuntime:
             ]
             if selected_job_lines:
                 selected_job_lines.insert(0, "当前项目允许的受控本地任务命令：")
+            selected_remote_lines = [
+                f"- {action.name}" for action in selected_project.remote_actions
+            ]
+            if selected_remote_lines:
+                selected_remote_lines.insert(0, "当前项目可触发的远程受控动作（按名称触发）：")
 
         context = "\n".join(
             (
@@ -204,6 +221,7 @@ class GovernorRuntime:
                 "",
                 current,
                 *selected_job_lines,
+                *selected_remote_lines,
                 "",
                 "用户明确提到另一个授权项目时，可以调用 governor_select_project 切换，不要被旧"
                 "项目记忆绑死。项目只读查询由你直接使用 governor_project_files、"
@@ -216,6 +234,9 @@ class GovernorRuntime:
                 "时会自动完成交付，不要重复调用文件交付工具。",
                 "用户明确要求把当前项目中的现有文件发给他时，调用 governor_deliver_file；不要"
                 "在用户未要求交付文件时调用。",
+                "当前项目登记了远程受控动作时（见上方清单），用户明确要求执行其中某个动作，"
+                "就用 governor_remote_task 并传入清单里的动作名称；动作的目标主机与命令都是"
+                "预先固定的，你只能按名称触发，不能自行构造命令或主机，也不要触发用户未要求的动作。",
                 "",
                 "默认行为只是分析或修改代码。打包、上传或部署只有在用户当前请求明确要求且存在"
                 "对应受控工具时才允许；绝不能自行打包、上传、部署、推送或发布。无法理解具体要做"
@@ -480,17 +501,29 @@ class GovernorRuntime:
         )
         return {**result, "project": project.display_name}
 
-    def _selected_project_for_read(self) -> Project:
+    def _selected_project(
+        self,
+        *,
+        action: str,
+        require_idle: bool,
+    ) -> tuple[SessionEnvironment, Project]:
+        """已授权环境 + 当前已选项目的公共前导，供只读、本地任务、远程动作复用。
+
+        require_idle=True 时，存在活动改码 worktree 会拒绝（这些动作与改码互斥）；
+        远程动作不碰本地仓库，但仍要求先结束改码任务，避免同一会话状态交错。
+        """
         env = self._require_authorized_environment()
         self._refresh_projects()
         record = self._record(env)
         if record.project_id is None:
-            raise RuntimeError("select an authorized project before reading code")
-        if record.active_worktree is not None:
-            raise RuntimeError(
-                "finish the active code task before starting a read-only project turn"
-            )
-        return self._projects[record.project_id]
+            raise RuntimeError(f"select an authorized project before {action}")
+        if require_idle and record.active_worktree is not None:
+            raise RuntimeError(f"finish the active code task before {action}")
+        return env, self._projects[record.project_id]
+
+    def _selected_project_for_read(self) -> Project:
+        _, project = self._selected_project(action="reading code", require_idle=True)
+        return project
 
     def codex_change(self, request: str, title: str) -> dict[str, str | None]:
         env = self._require_authorized_environment()
@@ -624,15 +657,48 @@ class GovernorRuntime:
             "artifacts": deliveries,
         }
 
+    def remote_task(self, action_name: str) -> dict[str, Any]:
+        env, project = self._selected_project(action="running a remote action", require_idle=True)
+        name = action_name.strip()
+        action = next((item for item in project.remote_actions if item.name == name), None)
+        if action is None:
+            raise PermissionError("remote action is not registered for this project")
+        # 发放许可证类动作必须可追溯：记录谁、在哪个会话、触发了哪个动作。
+        logger.info(
+            "governed remote action requested: action=%s project=%s user=%s chat=%s",
+            action.name,
+            project.project_id,
+            env.identity.user_id,
+            env.identity.chat_id,
+        )
+        self._notify(
+            env.identity,
+            f"正在为 {project.display_name}执行“{action.name}”，请稍候。",
+        )
+        result = self._remote.run(action)
+        succeeded = result.exit_code == 0
+        logger.info(
+            "governed remote action finished: action=%s user=%s exit=%s",
+            action.name,
+            env.identity.user_id,
+            result.exit_code,
+        )
+        # 成功时结果只取 stdout（避免把 ssh 的 stderr 警告当成激活码回给用户）；
+        # 失败时合并 stdout/stderr 供诊断，两者都截断防止淹没上下文并转发进群。
+        if succeeded:
+            output = combine_output(result.stdout, "")
+        else:
+            output = combine_output(result.stdout, result.stderr)
+        return {
+            "action": action.name,
+            "status": "completed" if succeeded else "failed",
+            "exit_code": result.exit_code,
+            "output": output,
+        }
+
     def _selected_project_for_job(self) -> Project:
-        env = self._require_authorized_environment()
-        self._refresh_projects()
-        record = self._record(env)
-        if record.project_id is None:
-            raise RuntimeError("select an authorized project before starting a local job")
-        if record.active_worktree is not None:
-            raise RuntimeError("finish the active code task before starting a local job")
-        return self._projects[record.project_id]
+        _, project = self._selected_project(action="starting a local job", require_idle=True)
+        return project
 
     def deliver_file(self, requested_path: str) -> dict[str, str | int | None]:
         env = self._require_authorized_environment()
