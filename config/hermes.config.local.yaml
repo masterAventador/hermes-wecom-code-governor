@@ -47,7 +47,8 @@ gateway:
           '*':
             allow_from:
               - woay8AEgAAw8MXiWiwMvDhA3H4jAQJWg
-        group_sessions_per_user: true
+        # 群会话按 chatid 共享上下文：同群成员共用一套对话记录与任务状态。
+        group_sessions_per_user: false
         thread_sessions_per_user: false
 onboarding:
   seen:

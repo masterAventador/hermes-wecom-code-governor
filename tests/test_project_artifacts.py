@@ -79,7 +79,7 @@ def test_hermes_config_patch_pins_subscription_model_and_plugin() -> None:
     assert data["timeouts"]["tools"]["concurrent_batch"] == 7200
     assert data["model"].get("openai_runtime", "auto") == "auto"
     assert "hermes-wecom-code-governor" in data["plugins"]["enabled"]
-    assert data["gateway"]["platforms"]["wecom"]["extra"]["group_sessions_per_user"] is True
+    assert data["gateway"]["platforms"]["wecom"]["extra"]["group_sessions_per_user"] is False
     assert "secret" not in data["gateway"]["platforms"]["wecom"]["extra"]
 
     example = yaml.safe_load((ROOT / "config" / "hermes.config.example.yaml").read_text())

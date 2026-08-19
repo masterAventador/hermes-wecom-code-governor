@@ -327,8 +327,8 @@ class GovernorRuntime:
     ) -> dict[str, str]:
         self._refresh_projects()
         prior = self._state.load(session_key)
-        if prior is None or prior.identity != identity:
-            raise PermissionError("project card does not belong to this user and chat")
+        if prior is None or not self._shares_session_scope(prior.identity, identity):
+            raise PermissionError("project card does not belong to this chat session")
         if not self._identity_is_authorized(identity):
             raise PermissionError("session identity is not authorized")
         project = self._resolve_authorized_project(identity, project_value)
@@ -662,9 +662,16 @@ class GovernorRuntime:
             self._pending_deliveries.pop(message_id, None)
         return delivery
 
+    @staticmethod
+    def _shares_session_scope(recorded: Identity, current: Identity) -> bool:
+        # 群会话按 chatid 共享：同一会话范围（chat_id + chat_type 相同）内的
+        # 授权成员共用一份记录；私聊 chat_id 即 userid，天然仍是一人一份。
+        # 跨会话的记录绝不复用。
+        return recorded.chat_id == current.chat_id and recorded.chat_type == current.chat_type
+
     def _record(self, env: SessionEnvironment) -> SessionRecord:
         record = self._state.load(env.session_key)
-        if record is None or record.identity != env.identity:
+        if record is None or not self._shares_session_scope(record.identity, env.identity):
             return SessionRecord(env.identity)
         if record.project_id not in self._current_policy().authorized_project_ids(env.identity):
             return SessionRecord(env.identity)

@@ -841,6 +841,66 @@ def test_codex_change_reseeds_a_resumed_worktree_before_starting_codex() -> None
     assert worktrees.reseeded == 1
 
 
+def make_shared_chat_runtime(state: MemoryState, identity: Identity) -> GovernorRuntime:
+    env = SessionEnvironment(
+        platform="wecom",
+        session_key="agent:main:wecom:group:chat-1",
+        identity=identity,
+        message_id=f"message-{identity.user_id}",
+    )
+    return GovernorRuntime(
+        GovernorConfig(
+            Path("/runtime"),
+            SafetyConfig(),
+            Policy(
+                (
+                    Project(
+                        "aijd-demo",
+                        "AIJD测试项目",
+                        Path("/Users/aventador/sourceCode/bjx/aijd-demo"),
+                    ),
+                ),
+                (
+                    PermissionGroup(
+                        "team",
+                        frozenset({"user-1", "user-3"}),
+                        frozenset({"*"}),
+                        frozenset({"aijd-demo"}),
+                    ),
+                ),
+            ),
+        ),
+        state,
+        env_provider=lambda: env,
+        worktrees=FakeWorktrees(),
+        codex=FakeCodex([], []),
+        now=lambda: (8, 19),
+    )
+
+
+def test_authorized_members_of_the_same_group_chat_share_session_state() -> None:
+    state = MemoryState()
+    first = make_shared_chat_runtime(state, Identity("user-1", "chat-1", "group"))
+    first.select_project("aijd-demo")
+
+    second = make_shared_chat_runtime(state, Identity("user-3", "chat-1", "group"))
+    context = second.pre_llm_call()["context"]
+
+    assert "当前项目：AIJD测试项目" in context
+    # 第二个人的消息不能把第一个人建立的会话状态冲掉
+    again = make_shared_chat_runtime(state, Identity("user-1", "chat-1", "group"))
+    assert "当前项目：AIJD测试项目" in again.pre_llm_call()["context"]
+
+
+def test_record_from_a_different_chat_is_never_reused() -> None:
+    state = MemoryState()
+    first = make_shared_chat_runtime(state, Identity("user-1", "chat-1", "group"))
+    first.select_project("aijd-demo")
+
+    other_chat = make_shared_chat_runtime(state, Identity("user-1", "chat-2", "group"))
+    assert "当前尚未选择项目" in other_chat.pre_llm_call()["context"]
+
+
 def test_identity_mismatch_cannot_reuse_persisted_session_state() -> None:
     state = MemoryState()
     first = make_runtime(state=state)
