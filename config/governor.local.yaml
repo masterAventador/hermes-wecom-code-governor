@@ -72,3 +72,12 @@ permissions:
       - "*"
     projects:
       - vpp-digital-twin
+
+  - name: teammate-vpp-in-test-group
+    # 同事仅限「虚拟电厂快速反馈小组」测试群内使用，控制 VPP 数字孪生项目。
+    users:
+      - woay8AEgAAZfzy3jtAr2Hg2bavWQUWKA
+    chats:
+      - wray8AEgAA2JNIuggrnHNURw-4Y1be8Q
+    projects:
+      - vpp-digital-twin

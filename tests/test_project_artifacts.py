@@ -29,6 +29,24 @@ def test_local_governor_config_contains_known_projects_and_no_secrets() -> None:
     assert config.policy.authorized_project_ids(
         Identity("woay8AEgAAw8MXiWiwMvDhA3H4jAQJWg", "any-chat", "group")
     ) == ("vpp-digital-twin",)
+    # 同事仅限测试群内使用，且只有 VPP 项目权限。
+    assert config.policy.authorized_project_ids(
+        Identity(
+            "woay8AEgAAZfzy3jtAr2Hg2bavWQUWKA",
+            "wray8AEgAA2JNIuggrnHNURw-4Y1be8Q",
+            "group",
+        )
+    ) == ("vpp-digital-twin",)
+    assert not config.policy.is_authorized(
+        Identity("woay8AEgAAZfzy3jtAr2Hg2bavWQUWKA", "other-chat", "group")
+    )
+    assert not config.policy.is_authorized(
+        Identity(
+            "woay8AEgAAZfzy3jtAr2Hg2bavWQUWKA",
+            "woay8AEgAAZfzy3jtAr2Hg2bavWQUWKA",
+            "dm",
+        )
+    )
     assert config.codex.model == "gpt-5.6-sol"
     assert config.codex.reasoning_effort == "xhigh"
     vpp = config.policy.project("vpp-digital-twin")
