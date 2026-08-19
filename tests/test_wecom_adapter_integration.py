@@ -180,3 +180,79 @@ def test_runtime_notice_is_delivered_as_a_plain_chat_message() -> None:
         "msgtype": "markdown",
         "markdown": {"content": "正在查看 VPP数字孪生项目，请稍候。"},
     }
+
+
+def message_payload(
+    *,
+    user_id: str,
+    chat_id: str | None = "chat-1",
+    chat_type: str = "group",
+    msg_id: str = "msg-1",
+) -> dict:
+    body: dict = {
+        "msgid": msg_id,
+        "from": {"userid": user_id},
+        "chattype": chat_type,
+        "text": {"content": "@机器人 帮我改代码"},
+    }
+    if chat_id is not None:
+        body["chatid"] = chat_id
+    return {"cmd": "aibot_callback", "headers": {"req_id": f"req-{msg_id}"}, "body": body}
+
+
+def test_unauthorized_group_mention_replies_ids_every_time_and_never_reaches_base() -> None:
+    runtime = FakeRuntime()
+    adapter_class = create_governed_adapter_class(runtime)
+    adapter = adapter_class(PlatformConfig(enabled=True, extra={"bot_id": "id", "secret": "s"}))
+    adapter.send = AsyncMock()
+    base_class = type(adapter).__mro__[1]
+
+    async def exercise() -> None:
+        with patch.object(base_class, "_on_message", new=AsyncMock()) as base_on_message:
+            await adapter._on_message(message_payload(user_id="stranger-9", msg_id="msg-1"))
+            await adapter._on_message(message_payload(user_id="stranger-9", msg_id="msg-2"))
+            # 同一条消息的协议层重复投递不重复提示
+            await adapter._on_message(message_payload(user_id="stranger-9", msg_id="msg-2"))
+            assert base_on_message.await_count == 0
+
+    asyncio.run(exercise())
+
+    assert adapter.send.await_count == 2
+    first = adapter.send.await_args_list[0]
+    assert first.args[0] == "chat-1"
+    assert "stranger-9" in first.args[1]
+    assert "chat-1" in first.args[1]
+    assert first.kwargs.get("reply_to") == "msg-1"
+
+
+def test_unauthorized_dm_notice_uses_sender_as_chat_id() -> None:
+    runtime = FakeRuntime()
+    adapter_class = create_governed_adapter_class(runtime)
+    adapter = adapter_class(PlatformConfig(enabled=True, extra={"bot_id": "id", "secret": "s"}))
+    adapter.send = AsyncMock()
+
+    asyncio.run(
+        adapter._on_message(message_payload(user_id="stranger-9", chat_id=None, chat_type="single"))
+    )
+
+    assert adapter.send.await_count == 1
+    call = adapter.send.await_args
+    assert call.args[0] == "stranger-9"
+    assert "stranger-9" in call.args[1]
+
+
+def test_authorized_message_passes_through_to_base_without_notice() -> None:
+    runtime = FakeRuntime()
+    adapter_class = create_governed_adapter_class(runtime)
+    adapter = adapter_class(PlatformConfig(enabled=True, extra={"bot_id": "id", "secret": "s"}))
+    adapter.send = AsyncMock()
+    base_class = type(adapter).__mro__[1]
+
+    async def exercise() -> None:
+        with patch.object(base_class, "_on_message", new=AsyncMock()) as base_on_message:
+            await adapter._on_message(message_payload(user_id="trusted-user"))
+            assert base_on_message.await_count == 1
+
+    asyncio.run(exercise())
+
+    assert adapter.send.await_count == 0

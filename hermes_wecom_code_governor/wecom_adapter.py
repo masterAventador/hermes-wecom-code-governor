@@ -43,6 +43,47 @@ def create_governed_adapter_class(runtime: GovernorRuntime):
             super().__init__(config)
             self._governor_cards: dict[str, _PendingProjectCard] = {}
 
+        async def _on_message(self, payload: dict[str, Any]) -> None:
+            body = payload.get("body")
+            if isinstance(body, dict):
+                sender = body.get("from") if isinstance(body.get("from"), dict) else {}
+                sender_id = str(sender.get("userid") or "").strip()
+                chat_id = str(body.get("chatid") or sender_id).strip()
+                chat_type = "group" if str(body.get("chattype") or "").lower() == "group" else "dm"
+                if (
+                    sender_id
+                    and chat_id
+                    and not runtime.is_authorized_identity(Identity(sender_id, chat_id, chat_type))
+                ):
+                    await self._notify_unauthorized(payload, sender_id, chat_id)
+                    return
+            await super()._on_message(payload)
+
+        async def _notify_unauthorized(
+            self,
+            payload: dict[str, Any],
+            sender_id: str,
+            chat_id: str,
+        ) -> None:
+            # 每次 @ 都回复（管理员靠这条拿 userid 开权限，宁可多发不可漏发）；
+            # 仅对同一条消息的协议层重复投递去重。
+            body = payload.get("body")
+            msg_id = str(body.get("msgid") or "").strip() if isinstance(body, dict) else ""
+            if msg_id and self._dedup.is_duplicate(msg_id):
+                return
+            if msg_id:
+                # 群里无法主动发消息，必须借这条消息自带的响应通道回话。
+                self._remember_reply_req_id(msg_id, self._payload_req_id(payload))
+            notice = (
+                "你还没有这个机器人的使用权限。请把下面两个 ID 发给管理员开通：\n"
+                f"userid：{sender_id}\n"
+                f"chatid：{chat_id}"
+            )
+            try:
+                await self.send(chat_id, notice, reply_to=msg_id or None)
+            except Exception:
+                logger.warning("未授权提示发送失败 user=%s chat=%s", sender_id, chat_id)
+
         def _is_dm_allowed(self, sender_id: str) -> bool:
             principal = str(sender_id or "").strip()
             return bool(principal) and runtime.is_authorized_identity(
