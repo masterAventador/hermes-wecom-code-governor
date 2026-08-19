@@ -88,3 +88,12 @@ permissions:
       - wray8AEgAA2JNIuggrnHNURw-4Y1be8Q
     projects:
       - vpp-digital-twin
+
+  - name: teammate-vpp-in-second-group
+    # 另一位同事仅限第二个测试群内使用，控制 VPP 数字孪生项目。
+    users:
+      - woay8AEgAA9pDEkYK11PFqReBQwSoRAg
+    chats:
+      - wray8AEgAAS_N13q4DAUbSk_fWnSHJhg
+    projects:
+      - vpp-digital-twin
