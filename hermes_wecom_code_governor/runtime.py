@@ -197,6 +197,11 @@ class GovernorRuntime:
                 "只保留一句直接结果和一个下载入口；下载入口由企微交付层自动追加，不要复述"
                 "工具返回的下载地址。",
                 "",
+                "可用工具只有以 governor_ 开头的治理工具和基础会话工具"
+                "（clarify、web_search、web_extract、vision_analyze、video_analyze、todo）。"
+                "不要尝试调用任何其他工具（如 tool_describe、session_search、文件或终端工具），"
+                "它们会被直接拦截，只会浪费时间。",
+                "",
                 current,
                 *selected_job_lines,
                 "",

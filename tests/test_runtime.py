@@ -309,6 +309,8 @@ def test_prompt_context_describes_identity_flexible_project_choice_and_current_s
     assert "argv 数组" not in context
     assert "50MiB" not in context
     assert "只回答用户明确提出的问题" in context
+    assert "可用工具只有以 governor_ 开头的治理工具和基础会话工具" in context
+    assert "不要尝试调用任何其他工具" in context
     assert "任务状态、退出码、基准提交、文件大小" in context
     assert "一句直接结果和一个下载入口" in context
     assert "不要复述工具返回的下载地址" in context

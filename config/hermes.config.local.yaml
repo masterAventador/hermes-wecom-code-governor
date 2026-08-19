@@ -20,7 +20,8 @@ display:
   tool_progress: 'off'
   interim_assistant_messages: false
   show_commentary: false
-  busy_ack_enabled: false
+  # 忙碌中收到新消息时先应一声，不再已读不回。
+  busy_ack_enabled: true
   runtime_footer:
     enabled: false
 plugins:
