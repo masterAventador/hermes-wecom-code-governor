@@ -278,10 +278,13 @@ def _parse_project(raw: Any, index: int) -> Project:
             job_data.get("allowed_commands"), f"{prefix}.job.allowed_commands"
         ),
         job_gui_commands=_commands(job_data.get("gui_commands"), f"{prefix}.job.gui_commands"),
-        job_network_commands=_commands(
-            job_data.get("network_commands"), f"{prefix}.job.network_commands"
+        job_trusted_commands=_commands(
+            job_data.get("trusted_commands"), f"{prefix}.job.trusted_commands"
         ),
         job_environment=_job_environment(job_data.get("environment"), f"{prefix}.job.environment"),
+        job_trusted_environment=_job_environment(
+            job_data.get("trusted_environment"), f"{prefix}.job.trusted_environment"
+        ),
         job_artifact_globs=_relative_paths(
             job_data.get("artifact_globs"), f"{prefix}.job.artifact_globs"
         ),
@@ -294,6 +297,9 @@ def _parse_project(raw: Any, index: int) -> Project:
             else 1800
         ),
         job_home_seeds=_home_seeds(job_data.get("home_seeds"), f"{prefix}.job.home_seeds"),
+        job_trusted_home_seeds=_home_seeds(
+            job_data.get("trusted_home_seeds"), f"{prefix}.job.trusted_home_seeds"
+        ),
         remote_actions=_remote_actions(data.get("remote_actions"), f"{prefix}.remote_actions"),
         push_on_merge=_boolean_field(data.get("push_on_merge", False), f"{prefix}.push_on_merge"),
         job_unix_sockets=tuple(

@@ -32,11 +32,19 @@ class Project:
     readable_paths: tuple[Path, ...] = ()
     job_allowed_commands: tuple[tuple[str, ...], ...] = ()
     job_gui_commands: tuple[tuple[str, ...], ...] = ()
-    job_network_commands: tuple[tuple[str, ...], ...] = ()
+    # 受信命令：无 seatbelt、HOME/TMPDIR 用真实值直接执行（macOS 钥匙串签名
+    # 与写限制沙箱互斥，且登录钥匙串签名依赖真实 HOME）。仅保留隔离 worktree
+    # 作为 cwd 与环境白名单，文件系统无限制——等价于用户亲自在终端执行；
+    # 仅登记确需签名/公证的打包命令。
+    job_trusted_commands: tuple[tuple[str, ...], ...] = ()
     job_environment: tuple[tuple[str, str], ...] = ()
+    # 仅受信命令可见的环境变量与 HOME 种子：签名证书、密钥密码等敏感材料
+    # 放这里，普通沙箱任务（测试/截图）不装配、也拿不到。
+    job_trusted_environment: tuple[tuple[str, str], ...] = ()
     job_artifact_globs: tuple[str, ...] = ()
     job_timeout_seconds: int = 1800
     job_home_seeds: tuple[tuple[Path, Path], ...] = ()
+    job_trusted_home_seeds: tuple[tuple[Path, Path], ...] = ()
     job_unix_sockets: tuple[Path, ...] = ()
     remote_actions: tuple[RemoteAction, ...] = ()
     push_on_merge: bool = False

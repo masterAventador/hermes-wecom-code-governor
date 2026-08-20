@@ -57,8 +57,11 @@ projects:
         - [npm, run, "qa:screenshot"]
       gui_commands:
         - [npm, run, "qa:screenshot"]
-      # mac 打包要签名公证（访问苹果服务），走允许出网的 seatbelt 执行档。
-      network_commands:
+      # mac 打包要 codesign 签名——macOS 钥匙串签名与写限制沙箱互斥，且登录
+      # 钥匙串签名依赖真实 HOME，走受信执行档（无 seatbelt、真实 HOME，等价于
+      # 用户在终端执行；cwd 仍是隔离 detached worktree）。签名身份用登录钥匙串、
+      # 公证 p8 在真实 HOME 的 ~/.appstoreconnect，均无需额外注入。
+      trusted_commands:
         - [npm, run, "build:mac"]
       environment:
         VPP_QA_USER_DATA: "${JOB_HOME}/Library/Application Support/vpp-digital-twin"
@@ -74,9 +77,6 @@ projects:
           target: Library/Caches/electron-builder
         - source: "/Users/aventador/Library/Application Support/vpp-digital-twin/licensing.json"
           target: "Library/Application Support/vpp-digital-twin/licensing.json"
-        # mac 公证密钥：build:mac 脚本按 $HOME 相对路径引用，种进隔离 HOME 同位置。
-        - source: /Users/aventador/.appstoreconnect/private_keys/AuthKey_92Y8QC7DRK.p8
-          target: .appstoreconnect/private_keys/AuthKey_92Y8QC7DRK.p8
       unix_sockets:
         - /private/var/run/mDNSResponder
 

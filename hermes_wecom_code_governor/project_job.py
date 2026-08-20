@@ -166,27 +166,17 @@ class SeatbeltGuiExecutor:
     这里用共享的 seatbelt profile（默认放行 + 定点收紧）承接需要拉起
     窗口进程的受控任务（如 Electron 静默截图）。"""
 
-    def __init__(
-        self,
-        denied_read_paths: tuple[Path, ...] = (),
-        *,
-        allow_network: bool = False,
-        allow_disk_images: bool = False,
-    ) -> None:
+    def __init__(self, denied_read_paths: tuple[Path, ...] = ()) -> None:
         sandbox_exec = shutil.which("sandbox-exec")
         if sandbox_exec is None:
             raise RuntimeError("sandbox-exec is required for governed GUI jobs")
         self._sandbox_exec = sandbox_exec
         self._denied_read_paths = denied_read_paths
-        self._allow_network = allow_network
-        self._allow_disk_images = allow_disk_images
 
     def build_command(self, request: JobExecutionRequest) -> tuple[str, ...]:
         profile = build_seatbelt_profile(
             (request.cwd, request.home, request.temporary),
             self._denied_read_paths,
-            allow_outbound_network=self._allow_network,
-            allow_disk_images=self._allow_disk_images,
         )
         return (self._sandbox_exec, "-p", profile, *request.argv)
 
@@ -204,6 +194,43 @@ class SeatbeltGuiExecutor:
     def run(self, request: JobExecutionRequest) -> JobExecutionResult:
         return _run_confined(
             self.build_command(request),
+            request,
+            self.build_environment(request, os.environ),
+        )
+
+
+class TrustedExecutor:
+    """受信任务执行器：不套 seatbelt，且与用户终端环境同构，供确需签名/公证
+    的打包命令使用。
+
+    macOS Security 框架只要检测到进程处于任何带写限制的 seatbelt 就禁用钥匙串
+    签名身份枚举（实测连 deny 一个不存在的路径都触发），且登录钥匙串签名依赖
+    进程看到真实 HOME——沙箱式隔离 HOME 下同样枚举不出有效身份。因此该档保留
+    隔离 worktree（cwd 仍是临时 detached worktree），但 HOME/TMPDIR 用真实值、
+    codesign 走用户登录钥匙串，等价于用户亲自在终端执行同一命令。
+
+    威胁模型必须说准：argv 虽是白名单固定的，但 npm script 实际执行什么由仓库
+    package.json 决定，而机器人有权修改并合并 package.json——所以这一档等同于
+    "执行一条机器人可改写定义的命令"，只登记确需签名的打包命令，别的都不进来。
+    """
+
+    @staticmethod
+    def build_environment(
+        request: JobExecutionRequest,
+        inherited: Mapping[str, str],
+    ) -> dict[str, str]:
+        # 白名单过滤（挡掉网关侧密钥等无关变量），保留真实 HOME/TMPDIR/PATH，
+        # 再并入项目登记的任务环境变量（受信材料在此注入）。
+        environment = {key: value for key, value in inherited.items() if key in _ENV_ALLOWLIST}
+        environment["HOME"] = inherited.get("HOME", str(Path.home()))
+        if inherited.get("TMPDIR"):
+            environment["TMPDIR"] = inherited["TMPDIR"]
+        environment.update(dict(request.environment))
+        return environment
+
+    def run(self, request: JobExecutionRequest) -> JobExecutionResult:
+        return _run_confined(
+            request.argv,
             request,
             self.build_environment(request, os.environ),
         )
@@ -252,7 +279,7 @@ class ProjectJobRunner:
         *,
         executor: JobExecutor | None = None,
         gui_executor: JobExecutor | None = None,
-        network_executor: JobExecutor | None = None,
+        trusted_executor: JobExecutor | None = None,
         codex_binary: Path | None = None,
     ) -> None:
         self.runtime_root = runtime_root.resolve()
@@ -271,15 +298,9 @@ class ProjectJobRunner:
                 denied_read_paths=(self.runtime_root.parent / "hermes-home",)
             )
         self._gui_executor = gui_executor
-        if network_executor is None:
-            # 出网档＝打包档：签名公证要访问外部服务，DMG 生成要写虚拟磁盘
-            # 设备与挂载卷；写入/密钥约束不变。
-            network_executor = SeatbeltGuiExecutor(
-                denied_read_paths=(self.runtime_root.parent / "hermes-home",),
-                allow_network=True,
-                allow_disk_images=True,
-            )
-        self._network_executor = network_executor
+        if trusted_executor is None:
+            trusted_executor = TrustedExecutor()
+        self._trusted_executor = trusted_executor
 
     def run(
         self,
@@ -308,14 +329,23 @@ class ProjectJobRunner:
         self._git(repo, "worktree", "add", "--detach", str(workspace), base_branch)
         home.mkdir(parents=True)
         temporary.mkdir(parents=True)
-        if _matches_any(project.job_network_commands, argv):
-            executor = self._network_executor
+        trusted = _matches_any(project.job_trusted_commands, argv)
+        if trusted:
+            executor = self._trusted_executor
         elif _matches_any(project.job_gui_commands, argv):
             executor = self._gui_executor
         else:
             executor = self._executor
+        # 签名证书、密钥密码等受信材料只给受信命令装配，普通任务拿不到。
+        home_seeds = project.job_home_seeds + (project.job_trusted_home_seeds if trusted else ())
+        environment_entries = project.job_environment + (
+            project.job_trusted_environment if trusted else ()
+        )
         try:
-            self._seed_job(project, workspace, home)
+            self._seed_job(project, workspace, home, home_seeds)
+            environment, secret_values = self._resolved_environment(
+                environment_entries, workspace, home
+            )
             execution = executor.run(
                 JobExecutionRequest(
                     cwd=workspace,
@@ -325,10 +355,17 @@ class ProjectJobRunner:
                     timeout_seconds=project.job_timeout_seconds,
                     readable_paths=project.readable_paths,
                     unix_sockets=project.job_unix_sockets,
-                    environment=self._resolved_environment(project, workspace, home),
+                    environment=environment,
                 )
             )
-            output = combine_output(execution.stdout, execution.stderr)
+            # 子进程可能把密钥回显（set -x、报错输出），输出会转发进企微群，必须
+            # 脱敏。要在截断之前对原始 stdout/stderr 替换——否则密钥骑在截断边界
+            # 上时，尾部会残留匹配不上的明文后缀。
+            stdout, stderr = execution.stdout, execution.stderr
+            for secret in secret_values:
+                stdout = stdout.replace(secret, "***")
+                stderr = stderr.replace(secret, "***")
+            output = combine_output(stdout, stderr)
             if execution.exit_code != 0:
                 return ProjectJobResult(
                     status="failed",
@@ -356,19 +393,27 @@ class ProjectJobRunner:
 
     @staticmethod
     def _resolved_environment(
-        project: Project,
+        entries: tuple[tuple[str, str], ...],
         workspace: Path,
         home: Path,
-    ) -> tuple[tuple[str, str], ...]:
-        return tuple(
-            (
-                name,
-                template.replace("${JOB_HOME}", str(home.resolve())).replace(
+    ) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
+        """解析环境变量模板，返回 (环境变量, 需要在输出里脱敏的密钥值)。"""
+        resolved: list[tuple[str, str]] = []
+        secrets: list[str] = []
+        for name, template in entries:
+            # ${SECRET_FILE:<路径>}：任务启动时从本机文件读取密钥值，
+            # 密钥本身不进入入库的配置文件；文件缺失时显式失败。
+            if template.startswith("${SECRET_FILE:") and template.endswith("}"):
+                secret_path = Path(template[len("${SECRET_FILE:") : -1])
+                value = secret_path.read_text(encoding="utf-8").rstrip("\n")
+                if value:
+                    secrets.append(value)
+            else:
+                value = template.replace("${JOB_HOME}", str(home.resolve())).replace(
                     "${WORKSPACE}", str(workspace.resolve())
-                ),
-            )
-            for name, template in project.job_environment
-        )
+                )
+            resolved.append((name, value))
+        return tuple(resolved), tuple(secrets)
 
     def _stage_artifacts(
         self,
@@ -434,14 +479,19 @@ class ProjectJobRunner:
                     + (", ".join(sorted(allowed_globs)) or "none")
                 )
         require_safe_seed_paths(project.seed_paths)
-        for _, target in project.job_home_seeds:
+        for _, target in (*project.job_home_seeds, *project.job_trusted_home_seeds):
             if target.is_absolute() or ".." in target.parts:
                 raise PermissionError("home seed target must stay inside the isolated home")
 
     @staticmethod
-    def _seed_job(project: Project, workspace: Path, home: Path) -> None:
+    def _seed_job(
+        project: Project,
+        workspace: Path,
+        home: Path,
+        home_seeds: tuple[tuple[Path, Path], ...],
+    ) -> None:
         seed_workspace(project.path, workspace, project.seed_paths)
-        for source_path, relative_target in project.job_home_seeds:
+        for source_path, relative_target in home_seeds:
             source = source_path.resolve(strict=True)
             destination = (home / relative_target).resolve()
             if not destination.is_relative_to(home.resolve()):

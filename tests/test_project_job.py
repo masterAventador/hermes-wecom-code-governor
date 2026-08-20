@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from hermes_wecom_code_governor.execution import MAX_OUTPUT_CHARS
 from hermes_wecom_code_governor.policy import Project
 from hermes_wecom_code_governor.project_job import (
     CodexSandboxExecutor,
@@ -14,6 +15,7 @@ from hermes_wecom_code_governor.project_job import (
     JobExecutionResult,
     ProjectJobRunner,
     SeatbeltGuiExecutor,
+    TrustedExecutor,
 )
 
 
@@ -147,7 +149,15 @@ def test_seatbelt_gui_executor_confines_writes_and_network_but_allows_gui(
     assert "(deny file-write*)" in profile
     for writable in (workspace, home, temporary):
         assert f'(allow file-write* (subpath "{writable.resolve()}"))' in profile
-    for denied in (Path.home() / ".ssh", Path.home() / ".hermes", secret_dir):
+    for denied in (
+        Path.home() / ".ssh",
+        Path.home() / ".hermes",
+        # 签名/公证密钥目录：p12、p12 密码、公证 p8 都不能被沙箱任务读到。
+        Path.home() / ".vpp-signing",
+        Path.home() / ".appstoreconnect",
+        Path.home() / ".at-tools-credentials",
+        secret_dir,
+    ):
         assert f'(deny file-read* (subpath "{denied.resolve()}"))' in profile
     assert command[-3:] == ("npm", "run", "qa:screenshot")
 
@@ -156,7 +166,7 @@ def test_seatbelt_gui_executor_confines_writes_and_network_but_allows_gui(
     assert environment["HOME"] == str(home.resolve())
 
 
-def test_seatbelt_executor_can_allow_outbound_network_for_registered_commands(
+def test_trusted_executor_matches_the_user_terminal_environment(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -168,137 +178,188 @@ def test_seatbelt_executor_can_allow_outbound_network_for_registered_commands(
         cwd=workspace,
         home=home,
         temporary=temporary,
-        argv=("npm", "run", "build:mac"),
-        timeout_seconds=120,
+        argv=("/bin/sh", "-c", "echo HOME=$HOME"),
+        timeout_seconds=60,
+        environment=(("CUSTOM_FLAG", "on"),),
     )
 
-    confined = SeatbeltGuiExecutor(denied_read_paths=())
-    networked = SeatbeltGuiExecutor(denied_read_paths=(), allow_network=True)
+    outcome = TrustedExecutor().run(request)
 
-    confined_profile = confined.build_command(request)[2]
-    networked_profile = networked.build_command(request)[2]
-    assert "(deny network*)" in confined_profile
-    # 出网档：不再整体禁网（签名公证要访问苹果服务），写入与密钥拒读约束不变
-    assert "(deny network*)" not in networked_profile
-    assert "(deny file-write*)" in networked_profile
-    assert f'(deny file-read* (subpath "{(Path.home() / ".ssh").resolve()}"))' in networked_profile
-
-
-def test_disk_image_profile_permits_device_and_volume_writes_only_when_enabled(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    home = tmp_path / "home"
-    temporary = tmp_path / "tmp"
-    for path in (workspace, home, temporary):
-        path.mkdir()
-    request = JobExecutionRequest(
-        cwd=workspace,
-        home=home,
-        temporary=temporary,
-        argv=("npm", "run", "build:mac"),
-        timeout_seconds=120,
-    )
-
-    packaging = SeatbeltGuiExecutor(
-        denied_read_paths=(), allow_network=True, allow_disk_images=True
-    )
-    plain_network = SeatbeltGuiExecutor(denied_read_paths=(), allow_network=True)
-
-    packaging_profile = packaging.build_command(request)[2]
-    plain_profile = plain_network.build_command(request)[2]
-    # 打包档：DMG 生成需要写虚拟磁盘设备节点并往挂载卷里拷文件。
-    assert '(allow file-write* (regex #"^/dev/r?disk[0-9]"))' in packaging_profile
-    assert '(allow file-write* (subpath "/Volumes"))' in packaging_profile
-    # 其他档一律不放行磁盘设备与挂载卷。
-    assert "/dev/r?disk" not in plain_profile
-    assert '(subpath "/Volumes")' not in plain_profile
-
-
-def test_runner_wires_disk_images_into_the_networked_executor_only(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    home = tmp_path / "home"
-    temporary = tmp_path / "tmp"
-    for path in (workspace, home, temporary):
-        path.mkdir()
-    runner = ProjectJobRunner(tmp_path / "runtime", codex_binary=Path("/usr/bin/true"))
-    request = JobExecutionRequest(
-        cwd=workspace,
-        home=home,
-        temporary=temporary,
-        argv=("npm", "run", "build:mac"),
-        timeout_seconds=120,
-    )
-
-    # 出厂装配门禁：出网打包档必须带磁盘镜像能力，GUI 档必须不带。
-    networked_profile = runner._network_executor.build_command(request)[2]
-    gui_profile = runner._gui_executor.build_command(request)[2]
-    assert '(allow file-write* (subpath "/Volumes"))' in networked_profile
-    assert '(subpath "/Volumes")' not in gui_profile
-
-
-def test_hdiutil_creates_a_filesystem_image_inside_the_packaging_sandbox(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    home = tmp_path / "home"
-    temporary = tmp_path / "tmp"
-    for path in (workspace, home, temporary):
-        path.mkdir()
-
-    def create_request(name: str) -> JobExecutionRequest:
-        return JobExecutionRequest(
-            cwd=workspace,
-            home=home,
-            temporary=temporary,
-            argv=(
-                "hdiutil",
-                "create",
-                "-size",
-                "2m",
-                "-fs",
-                "HFS+",
-                "-volname",
-                "GovernorTest",
-                "-ov",
-                str(workspace / name),
-            ),
-            timeout_seconds=120,
-        )
-
-    packaging = SeatbeltGuiExecutor(
-        denied_read_paths=(), allow_network=True, allow_disk_images=True
-    )
-    outcome = packaging.run(create_request("allowed.dmg"))
+    # 受信档与用户终端同构：保留真实 HOME（登录钥匙串签名依赖它——
+    # Security 框架在非真实 HOME 下判定不出有效签名身份），不做沙箱式隔离。
     assert outcome.exit_code == 0, outcome.stderr
-    assert (workspace / "allowed.dmg").exists()
+    assert f"HOME={Path.home()}" in outcome.stdout
 
-    # 对照：未开磁盘镜像的出网档必须仍拦住同一命令，证明本测试能给出否定答案。
-    plain_network = SeatbeltGuiExecutor(denied_read_paths=(), allow_network=True)
-    denied = plain_network.run(create_request("denied.dmg"))
-    assert denied.exit_code != 0
-    assert not (workspace / "denied.dmg").exists()
+    environment = TrustedExecutor.build_environment(
+        request,
+        {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(Path.home()),
+            "TMPDIR": "/var/folders/xx/T/",
+            "WECOM_SECRET": "leak-me",
+        },
+    )
+    assert environment["HOME"] == str(Path.home())
+    assert environment["TMPDIR"] == "/var/folders/xx/T/"
+    assert environment["CUSTOM_FLAG"] == "on"
+    # 网关侧密钥等白名单外变量仍不透传。
+    assert "WECOM_SECRET" not in environment
 
 
-def test_network_marked_commands_run_on_the_networked_executor(tmp_path: Path) -> None:
+def test_trusted_marked_commands_run_on_the_trusted_executor(tmp_path: Path) -> None:
     repo = create_repo(tmp_path)
     default_executor = FakeExecutor()
     gui_executor = FakeExecutor()
-    network_executor = FakeExecutor()
+    trusted_executor = FakeExecutor()
     runner = ProjectJobRunner(
         tmp_path / "runtime",
         executor=default_executor,
         gui_executor=gui_executor,
-        network_executor=network_executor,
+        trusted_executor=trusted_executor,
     )
-    configured = project(repo, job_network_commands=(("./build-artifact",),))
+    configured = project(repo, job_trusted_commands=(("./build-artifact",),))
 
-    result = runner.run(configured, job_id="0820-net", argv=("./build-artifact",))
+    result = runner.run(configured, job_id="0820-trusted", argv=("./build-artifact",))
 
     assert result.status == "completed"
-    assert len(network_executor.requests) == 1
+    assert len(trusted_executor.requests) == 1
     assert default_executor.requests == []
     assert gui_executor.requests == []
+
+
+def test_runner_defaults_the_trusted_executor_to_no_sandbox(tmp_path: Path) -> None:
+    runner = ProjectJobRunner(tmp_path / "runtime", codex_binary=Path("/usr/bin/true"))
+
+    # 出厂装配门禁：受信档必须是 TrustedExecutor（钥匙串签名与 seatbelt 互斥），
+    # GUI 档必须仍是 seatbelt 收紧档。
+    assert isinstance(runner._trusted_executor, TrustedExecutor)
+    assert isinstance(runner._gui_executor, SeatbeltGuiExecutor)
+
+
+def test_trusted_environment_and_seeds_reach_only_trusted_commands(tmp_path: Path) -> None:
+    repo = create_repo(tmp_path)
+    secret = tmp_path / "p12-password"
+    secret.write_text("sign-pass\n", encoding="utf-8")
+    p12_source = tmp_path / "developer-id.p12"
+    p12_source.write_bytes(b"p12-bytes")
+
+    @dataclass
+    class HomeSnapshotExecutor:
+        def __post_init__(self) -> None:
+            self.requests: list[JobExecutionRequest] = []
+            self.saw_p12 = False
+
+        def run(self, request: JobExecutionRequest) -> JobExecutionResult:
+            self.requests.append(request)
+            self.saw_p12 = (request.home / ".vpp-signing/developer-id.p12").exists()
+            return JobExecutionResult(0, "ok", "")
+
+    default_executor = HomeSnapshotExecutor()
+    trusted_executor = HomeSnapshotExecutor()
+    runner = ProjectJobRunner(
+        tmp_path / "runtime",
+        executor=default_executor,
+        gui_executor=FakeExecutor(),
+        trusted_executor=trusted_executor,
+    )
+    configured = project(
+        repo,
+        job_allowed_commands=(("./build-artifact",), ("./package-mac",)),
+        job_trusted_commands=(("./package-mac",),),
+        job_artifact_globs=(),
+        job_environment=(("SHARED_FLAG", "on"),),
+        job_trusted_environment=(("CSC_KEY_PASSWORD", f"${{SECRET_FILE:{secret}}}"),),
+        job_trusted_home_seeds=((p12_source, Path(".vpp-signing/developer-id.p12")),),
+    )
+
+    runner.run(configured, job_id="0820-plain", argv=("./build-artifact",))
+    runner.run(configured, job_id="0820-mac", argv=("./package-mac",))
+
+    # 非受信命令：拿不到签名材料——环境无密钥、隔离 HOME 无 p12。
+    plain_env = dict(default_executor.requests[0].environment)
+    assert plain_env == {"SHARED_FLAG": "on"}
+    assert default_executor.saw_p12 is False
+    # 受信命令：签名材料齐备。
+    trusted_env = dict(trusted_executor.requests[0].environment)
+    assert trusted_env["SHARED_FLAG"] == "on"
+    assert trusted_env["CSC_KEY_PASSWORD"] == "sign-pass"
+    assert trusted_executor.saw_p12 is True
+
+
+def test_secret_values_are_masked_in_job_output(tmp_path: Path) -> None:
+    repo = create_repo(tmp_path)
+    secret = tmp_path / "p12-password"
+    secret.write_text("sign-pass-9f3\n", encoding="utf-8")
+
+    @dataclass
+    class LeakyExecutor:
+        def run(self, request: JobExecutionRequest) -> JobExecutionResult:
+            # 密钥可能从任一通道回显——codesign/notarytool 报错、set -x 走 stderr。
+            return JobExecutionResult(
+                1,
+                "keychain unlock -p sign-pass-9f3 failed",
+                "codesign: ambient credential sign-pass-9f3 rejected",
+            )
+
+    runner = ProjectJobRunner(
+        tmp_path / "runtime",
+        executor=FakeExecutor(),
+        gui_executor=FakeExecutor(),
+        trusted_executor=LeakyExecutor(),
+    )
+    configured = project(
+        repo,
+        job_allowed_commands=(("./package-mac",),),
+        job_trusted_commands=(("./package-mac",),),
+        job_artifact_globs=(),
+        job_trusted_environment=(("CSC_KEY_PASSWORD", f"${{SECRET_FILE:{secret}}}"),),
+    )
+
+    result = runner.run(configured, job_id="0820-leak", argv=("./package-mac",))
+
+    # 密钥值在回传输出里必须被脱敏——它会经模型转发进企微群，stdout/stderr 皆然。
+    assert "sign-pass-9f3" not in result.output
+    assert result.output.count("***") >= 2
+
+
+def test_secret_masking_happens_before_output_truncation(tmp_path: Path) -> None:
+    repo = create_repo(tmp_path)
+    secret_value = "S3cret-P12-Password-Value"
+    secret = tmp_path / "p12-password"
+    secret.write_text(secret_value + "\n", encoding="utf-8")
+
+    @dataclass
+    class BoundaryLeakExecutor:
+        def run(self, request: JobExecutionRequest) -> JobExecutionResult:
+            # 让密钥恰好横跨截断切点（total - MAX_OUTPUT_CHARS 落在密钥中间）：
+            # 尾部 padding 必须小于 MAX_OUTPUT_CHARS，否则密钥整段被丢弃、
+            # 新旧顺序都测不出差别。若先截断后脱敏，尾部会残留明文后缀。
+            head = "x" * (MAX_OUTPUT_CHARS - 10)
+            tail = "y" * (MAX_OUTPUT_CHARS - 10)
+            stdout = head + secret_value + tail
+            cut = len(stdout) - MAX_OUTPUT_CHARS
+            assert len(head) < cut < len(head) + len(secret_value)
+            return JobExecutionResult(1, stdout, "")
+
+    runner = ProjectJobRunner(
+        tmp_path / "runtime",
+        executor=FakeExecutor(),
+        gui_executor=FakeExecutor(),
+        trusted_executor=BoundaryLeakExecutor(),
+    )
+    configured = project(
+        repo,
+        job_allowed_commands=(("./package-mac",),),
+        job_trusted_commands=(("./package-mac",),),
+        job_artifact_globs=(),
+        job_trusted_environment=(("CSC_KEY_PASSWORD", f"${{SECRET_FILE:{secret}}}"),),
+    )
+
+    result = runner.run(configured, job_id="0820-boundary", argv=("./package-mac",))
+
+    # 密钥的任何一段都不允许残留——脱敏必须发生在截断之前。
+    for length in range(6, len(secret_value) + 1):
+        assert secret_value[-length:] not in result.output
 
 
 def test_project_environment_reaches_executor_with_job_home_resolved(tmp_path: Path) -> None:
@@ -318,6 +379,36 @@ def test_project_environment_reaches_executor_with_job_home_resolved(tmp_path: P
     assert request.environment == (
         ("VPP_QA_USER_DATA", f"{expected_home.resolve()}/Library/App Support/vpp"),
     )
+
+
+def test_secret_file_environment_values_are_read_from_the_local_file(tmp_path: Path) -> None:
+    repo = create_repo(tmp_path)
+    executor = FakeExecutor()
+    runner = ProjectJobRunner(tmp_path / "runtime", executor=executor)
+    secret = tmp_path / "p12-password"
+    secret.write_text("s3cret-value\n", encoding="utf-8")
+    configured = project(
+        repo,
+        job_environment=(("CSC_KEY_PASSWORD", f"${{SECRET_FILE:{secret}}}"),),
+    )
+
+    runner.run(configured, job_id="0820-secret", argv=("./build-artifact",))
+
+    # 密钥值在任务启动时从本机文件读出（去掉尾部换行），不经过入库配置。
+    assert executor.requests[0].environment == (("CSC_KEY_PASSWORD", "s3cret-value"),)
+
+
+def test_missing_secret_file_fails_the_job_loudly(tmp_path: Path) -> None:
+    repo = create_repo(tmp_path)
+    runner = ProjectJobRunner(tmp_path / "runtime", executor=FakeExecutor())
+    configured = project(
+        repo,
+        job_environment=(("CSC_KEY_PASSWORD", f"${{SECRET_FILE:{tmp_path / 'absent-file'}}}"),),
+    )
+
+    # 密钥文件缺失必须显式失败，不能静默注入空值让签名环节晚点才炸。
+    with pytest.raises(FileNotFoundError):
+        runner.run(configured, job_id="0820-nosecret", argv=("./build-artifact",))
 
 
 def test_request_environment_cannot_override_managed_isolation_keys(tmp_path: Path) -> None:

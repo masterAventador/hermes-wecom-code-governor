@@ -82,13 +82,17 @@ def test_local_governor_config_contains_known_projects_and_no_secrets() -> None:
         ("npm", "run", "qa:screenshot"),
     )
     assert vpp.job_gui_commands == (("npm", "run", "qa:screenshot"),)
-    assert vpp.job_network_commands == (("npm", "run", "build:mac"),)
+    assert vpp.job_trusted_commands == (("npm", "run", "build:mac"),)
     assert vpp.job_environment == (
         (
             "VPP_QA_USER_DATA",
             "${JOB_HOME}/Library/Application Support/vpp-digital-twin",
         ),
     )
+    # mac 签名走真实 HOME 的登录钥匙串（受信档与用户终端同构），
+    # 不向任何任务环境注入签名材料。
+    assert vpp.job_trusted_environment == ()
+    assert vpp.job_trusted_home_seeds == ()
     assert vpp.job_artifact_globs == (
         "release/*.exe",
         "release/*.dmg",
@@ -108,6 +112,67 @@ def test_local_governor_config_contains_known_projects_and_no_secrets() -> None:
     assert "\n    package:" not in text
     for forbidden in ("SecretId", "SecretKey", "WECOM_SECRET", "AKID"):
         assert forbidden not in text
+
+
+def test_sensitive_environment_values_must_come_from_secret_files() -> None:
+    config = load_governor_config(ROOT / "config" / "governor.local.yaml")
+
+    # 名字像密钥的环境变量禁止在入库配置里写明文，必须走 SECRET_FILE。
+    for project in config.policy.projects:
+        for name, value in (*project.job_environment, *project.job_trusted_environment):
+            if any(marker in name.upper() for marker in ("PASSWORD", "SECRET", "TOKEN")):
+                assert value.startswith("${SECRET_FILE:"), (
+                    f"{project.project_id}.{name} 必须使用 SECRET_FILE，不允许明文"
+                )
+
+
+def test_secret_file_values_may_only_live_in_the_trusted_environment() -> None:
+    config = load_governor_config(ROOT / "config" / "governor.local.yaml")
+
+    # SECRET_FILE 值出现在普通 environment 就是把密钥下发给全部沙箱任务，
+    # 与项目数无关的通用不变量：密钥值只允许进受信桶。
+    for project in config.policy.projects:
+        for name, value in project.job_environment:
+            assert not value.startswith("${SECRET_FILE:"), (
+                f"{project.project_id}.{name} 是密钥值，必须放 trusted_environment"
+            )
+
+
+def test_plain_home_seeds_must_not_come_from_secret_directories() -> None:
+    from hermes_wecom_code_governor.sandbox_profile import _HOME_SECRET_DIRS
+
+    config = load_governor_config(ROOT / "config" / "governor.local.yaml")
+    home = Path("/Users/aventador")
+    denied_roots = tuple(home / relative for relative in _HOME_SECRET_DIRS)
+
+    # 拒读名单目录里的文件属于密钥材料，只允许经 trusted_home_seeds 下发。
+    for project in config.policy.projects:
+        for source, _target in project.job_home_seeds:
+            assert not any(source.is_relative_to(root) for root in denied_roots), (
+                f"{project.project_id} 普通种子 {source} 来自密钥目录，必须改放 trusted_home_seeds"
+            )
+
+
+def test_secret_sources_are_denied_to_sandboxed_jobs() -> None:
+    from hermes_wecom_code_governor.sandbox_profile import _HOME_SECRET_DIRS
+
+    config = load_governor_config(ROOT / "config" / "governor.local.yaml")
+    home = Path("/Users/aventador")
+    denied_roots = tuple(home / relative for relative in _HOME_SECRET_DIRS)
+
+    # 受信种子与 SECRET_FILE 引用的每个来源都必须落在沙箱拒读名单内，
+    # 否则普通沙箱任务可以直接读走签名材料。
+    for project in config.policy.projects:
+        for source, _target in project.job_trusted_home_seeds:
+            assert any(source.is_relative_to(root) for root in denied_roots), (
+                f"{project.project_id} 受信种子 {source} 不在沙箱拒读名单内"
+            )
+        for name, value in (*project.job_environment, *project.job_trusted_environment):
+            if value.startswith("${SECRET_FILE:") and value.endswith("}"):
+                secret_path = Path(value[len("${SECRET_FILE:") : -1])
+                assert any(secret_path.is_relative_to(root) for root in denied_roots), (
+                    f"{project.project_id}.{name} 的密钥文件 {secret_path} 不在沙箱拒读名单内"
+                )
 
 
 def test_hermes_config_patch_pins_subscription_model_and_plugin() -> None:
