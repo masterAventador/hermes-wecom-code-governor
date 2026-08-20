@@ -67,8 +67,8 @@ class FakeRuntime:
     def project_git(self, **kwargs: object) -> dict:
         return {"git": kwargs}
 
-    def codex_change(self, request: str, title: str) -> dict:
-        return {"answer": request, "task_id": title}
+    def codex_change(self, request: str, title: str, ack: str | None = None) -> dict:
+        return {"answer": request, "task_id": title, "ack": ack}
 
     def project_job(
         self,
@@ -76,8 +76,12 @@ class FakeRuntime:
         argv: list[str],
         artifact_globs: list[str],
         title: str,
+        ack: str | None = None,
     ) -> dict:
-        return {"argv": argv, "artifact_globs": artifact_globs, "title": title}
+        return {"argv": argv, "artifact_globs": artifact_globs, "title": title, "ack": ack}
+
+    def remote_task(self, action: str, ack: str | None = None) -> dict:
+        return {"action": action, "ack": ack}
 
     def deliver_file(self, path: str) -> dict:
         return {"channel": "wecom", "filename": path}
@@ -142,10 +146,11 @@ def test_registers_governance_hooks_and_model_tools() -> None:
     }
     assert call_tool(
         ctx.tools["governor_codex_change"],
-        {"request": "修复登录", "title": "登录修复"},
+        {"request": "修复登录", "title": "登录修复", "ack": "收到，这就去修登录。"},
     ) == {
         "answer": "修复登录",
         "task_id": "登录修复",
+        "ack": "收到，这就去修登录。",
     }
     assert call_tool(
         ctx.tools["governor_project_job"],
@@ -153,11 +158,20 @@ def test_registers_governance_hooks_and_model_tools() -> None:
             "argv": ["npm", "run", "build:win"],
             "artifact_globs": ["release/*.exe"],
             "title": "生成安装包",
+            "ack": "开始打 Windows 包，好了发你。",
         },
     ) == {
         "argv": ["npm", "run", "build:win"],
         "artifact_globs": ["release/*.exe"],
         "title": "生成安装包",
+        "ack": "开始打 Windows 包，好了发你。",
+    }
+    assert call_tool(
+        ctx.tools["governor_remote_task"],
+        {"action": "生成激活码", "ack": "这就去生成一个新激活码。"},
+    ) == {
+        "action": "生成激活码",
+        "ack": "这就去生成一个新激活码。",
     }
     assert call_tool(
         ctx.tools["governor_deliver_file"],

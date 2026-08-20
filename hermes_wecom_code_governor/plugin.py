@@ -89,6 +89,21 @@ def _optional_text_list(args: dict, key: str) -> list[str]:
     return _text_list(args, key)
 
 
+# 三个耗时工具共用的开工回复参数说明（值复用：改文案只改这一处）。
+_ACK_DESCRIPTION = (
+    "开工时立即回复给用户的一句话，用你自己的口吻结合用户这次的原话来写；省略则发系统默认提示"
+)
+
+
+def _optional_text(args: dict, key: str) -> str | None:
+    value = args.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string")
+    return value
+
+
 def _tool_schema(name: str, description: str, properties: dict, required: list[str]) -> dict:
     return {
         "name": name,
@@ -239,10 +254,16 @@ def register_runtime_components(ctx: Any, runtime: GovernorRuntime | Any) -> Non
                     "type": "string",
                     "description": "根据用户要求概括的不超过 12 个字的语义任务名",
                 },
+                "ack": {
+                    "type": "string",
+                    "description": _ACK_DESCRIPTION,
+                },
             },
             ["request", "title"],
             lambda args: runtime.codex_change(
-                _required_text(args, "request"), _required_text(args, "title")
+                _required_text(args, "request"),
+                _required_text(args, "title"),
+                ack=_optional_text(args, "ack"),
             ),
         ),
         (
@@ -268,12 +289,17 @@ def register_runtime_components(ctx: Any, runtime: GovernorRuntime | Any) -> Non
                     "type": "string",
                     "description": "不超过 12 个字的本地任务名称",
                 },
+                "ack": {
+                    "type": "string",
+                    "description": _ACK_DESCRIPTION,
+                },
             },
             ["argv", "title"],
             lambda args: runtime.project_job(
                 argv=_text_list(args, "argv"),
                 artifact_globs=_optional_text_list(args, "artifact_globs"),
                 title=_required_text(args, "title"),
+                ack=_optional_text(args, "ack"),
             ),
         ),
         (
@@ -292,10 +318,17 @@ def register_runtime_components(ctx: Any, runtime: GovernorRuntime | Any) -> Non
                 "action": {
                     "type": "string",
                     "description": "当前项目 remote_actions 中登记的动作名称",
-                }
+                },
+                "ack": {
+                    "type": "string",
+                    "description": _ACK_DESCRIPTION,
+                },
             },
             ["action"],
-            lambda args: runtime.remote_task(_required_text(args, "action")),
+            lambda args: runtime.remote_task(
+                _required_text(args, "action"),
+                ack=_optional_text(args, "ack"),
+            ),
         ),
         (
             "governor_deliver_file",

@@ -204,6 +204,38 @@ def test_runtime_notice_is_delivered_as_a_plain_chat_message() -> None:
     }
 
 
+def test_notify_reports_send_failure_to_the_caller() -> None:
+    runtime = FakeRuntime()
+    adapter_class = create_governed_adapter_class(runtime)
+    adapter = adapter_class(PlatformConfig(enabled=True, extra={"bot_id": "id", "secret": "s"}))
+    adapter.send = AsyncMock(side_effect=RuntimeError("wecom rejected the message"))
+    base_class = type(adapter).__mro__[1]
+    outcome: dict[str, bool] = {}
+
+    async def exercise() -> None:
+        with patch.object(base_class, "_dispatch_payload", new=AsyncMock()):
+            await adapter._dispatch_payload(
+                message_payload(user_id="trusted-user", msg_id="trigger-9")
+            )
+        assert runtime.notifier is not None
+
+        def call_notifier() -> None:
+            try:
+                runtime.notifier(runtime.identity, "自拟的开工话术")
+            except Exception:
+                outcome["raised"] = True
+            else:
+                outcome["raised"] = False
+
+        await asyncio.to_thread(call_notifier)
+
+    asyncio.run(exercise())
+
+    # 发送失败必须传回调用方——runtime 靠它决定不记"已提示"，重试才能补发；
+    # fire-and-forget 会让这条保障静默失效。
+    assert outcome["raised"] is True
+
+
 def message_payload(
     *,
     user_id: str,

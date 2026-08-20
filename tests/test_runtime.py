@@ -975,6 +975,99 @@ def test_remote_task_runs_named_action_and_returns_output() -> None:
     assert notices == ["正在为 VPP数字孪生项目执行“生成激活码”，请稍候。"]
 
 
+def test_model_written_ack_replaces_the_stock_notice() -> None:
+    jobs = FakeJobs(
+        ProjectJobResult(
+            status="completed",
+            exit_code=0,
+            output="ok",
+            base_commit="a" * 40,
+        )
+    )
+    remote = FakeRemote()
+    notices: list[str] = []
+    runtime = make_runtime(
+        jobs=jobs,
+        remote=remote,
+        projects=(
+            Project(
+                "vpp-digital-twin",
+                "VPP数字孪生项目",
+                Path("/Users/aventador/sourceCode/vpp-digital-twin"),
+                job_allowed_commands=(("npm", "test"),),
+                remote_actions=(
+                    RemoteAction(
+                        name="生成激活码",
+                        host="root@license.example",
+                        argv=("node", "/opt/vpp-license/issue.mjs"),
+                    ),
+                ),
+            ),
+        ),
+        notifier=lambda _identity, text: notices.append(text),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    # 模型自拟的开工提示直接替换模板句，让即时反馈贴合用户原话。
+    runtime.project_job(
+        argv=["npm", "test"],
+        title="跑测试",
+        ack="收到，充值到账了我再打一次包，好了发你链接。",
+    )
+    runtime.remote_task("生成激活码", ack="马上给你生成一个新的激活码。")
+
+    assert notices == [
+        "收到，充值到账了我再打一次包，好了发你链接。",
+        "马上给你生成一个新的激活码。",
+    ]
+
+
+def test_blank_ack_falls_back_to_the_stock_notice() -> None:
+    jobs = FakeJobs(
+        ProjectJobResult(
+            status="completed",
+            exit_code=0,
+            output="ok",
+            base_commit="a" * 40,
+        )
+    )
+    notices: list[str] = []
+    runtime = make_runtime(
+        jobs=jobs,
+        projects=(
+            Project(
+                "vpp-digital-twin",
+                "VPP数字孪生项目",
+                Path("/Users/aventador/sourceCode/vpp-digital-twin"),
+                job_allowed_commands=(("npm", "test"),),
+            ),
+        ),
+        notifier=lambda _identity, text: notices.append(text),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    runtime.project_job(argv=["npm", "test"], title="跑测试", ack="   ")
+
+    assert notices == ["正在为 VPP数字孪生项目执行“跑测试”，请稍候。"]
+
+
+def test_codex_change_accepts_a_model_written_ack() -> None:
+    notices: list[str] = []
+    codex = FakeCodex(
+        [CodexRunResult("write-thread", "已修改。", CodexTaskState.COMPLETED)],
+        [],
+    )
+    runtime = make_runtime(
+        codex=codex,
+        notifier=lambda _identity, text: notices.append(text),
+    )
+    runtime.select_project("aijd-demo")
+
+    runtime.codex_change("修复接口问题", "修复接口", ack="收到，这就去改接口，改完告诉你。")
+
+    assert notices == ["收到，这就去改接口，改完告诉你。"]
+
+
 def test_remote_task_retry_on_the_same_message_notifies_once() -> None:
     remote = FakeRemote(stdout="VPP-5QH2-34MZ-HRRU\n")
     notices: list[str] = []

@@ -261,20 +261,20 @@ def create_governed_adapter_class(runtime: GovernorRuntime):
                     ),
                     loop,
                 )
-
-                def consume_result(completed: object) -> None:
-                    try:
-                        result = completed.result()
-                    except Exception:
-                        logger.exception("Failed to deliver governor processing notice")
-                        return
-                    if not result.success:
-                        logger.warning(
-                            "Failed to deliver governor processing notice: %s",
-                            result.error,
-                        )
-
-                future.add_done_callback(consume_result)
+                # 调用方在工具线程，同步等待真实发送结果不会死锁。失败必须抛给
+                # 调用方——runtime 靠它决定不记"已提示"，同一条消息的重试才能补发；
+                # fire-and-forget 会让这条保障静默失效。
+                try:
+                    result = future.result(timeout=15)
+                except Exception:
+                    logger.exception("Failed to deliver governor processing notice")
+                    raise
+                if not result.success:
+                    logger.warning(
+                        "Failed to deliver governor processing notice: %s",
+                        result.error,
+                    )
+                    raise RuntimeError(f"wecom notice rejected: {result.error}")
 
             runtime.set_notifier(notify)
             event = parse_card_event(payload)

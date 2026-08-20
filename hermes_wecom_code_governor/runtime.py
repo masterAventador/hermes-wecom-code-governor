@@ -256,6 +256,9 @@ class GovernorRuntime:
                 "当前项目登记了远程受控动作时（见上方清单），用户明确要求执行其中某个动作，"
                 "就用 governor_remote_task 并传入清单里的动作名称；动作的目标主机与命令都是"
                 "预先固定的，你只能按名称触发，不能自行构造命令或主机，也不要触发用户未要求的动作。",
+                "调用 governor_codex_change、governor_project_job、governor_remote_task 这类耗时"
+                "工具时，请通过 ack 参数先给用户一句回复，告诉他你接下来要做什么；内容和语气由你"
+                "自己组织，回应用户这次说的话就好，别每次都用同一个句式。",
                 "",
                 "默认行为只是分析或修改代码。打包、上传或部署只有在用户当前请求明确要求且存在"
                 "对应受控工具时才允许；绝不能自行打包、上传、部署、推送或发布。无法理解具体要做"
@@ -544,7 +547,15 @@ class GovernorRuntime:
         _, project = self._selected_project(action="reading code", require_idle=True)
         return project
 
-    def codex_change(self, request: str, title: str) -> dict[str, str | None]:
+    @staticmethod
+    def _ack_or(ack: str | None, fallback: str) -> str:
+        """模型自拟的开工回复优先；没写（或全空白）才用模板句兜底。"""
+        text = (ack or "").strip()
+        return text if text else fallback
+
+    def codex_change(
+        self, request: str, title: str, ack: str | None = None
+    ) -> dict[str, str | None]:
         env = self._require_authorized_environment()
         self._refresh_projects()
         record = self._record(env)
@@ -560,7 +571,11 @@ class GovernorRuntime:
         if resumed:
             self._worktrees.ensure_seeded(active)
         readable, writable = self._worktrees.codex_roots(active)
-        self._notify_once(env, "codex", f"正在修改 {active.project.display_name}，请稍候。")
+        self._notify_once(
+            env,
+            "codex",
+            self._ack_or(ack, f"正在修改 {active.project.display_name}，请稍候。"),
+        )
         result = self._codex.run(
             CodexRunRequest(
                 mode=CodexMode.WRITE,
@@ -619,6 +634,7 @@ class GovernorRuntime:
         argv: list[str],
         artifact_globs: list[str] | None = None,
         title: str,
+        ack: str | None = None,
     ) -> dict[str, Any]:
         env = self._require_authorized_environment()
         project = self._selected_project_for_job()
@@ -652,7 +668,7 @@ class GovernorRuntime:
         self._notify_once(
             env,
             "job",
-            f"正在为 {project.display_name}执行“{normalized_title}”，请稍候。",
+            self._ack_or(ack, f"正在为 {project.display_name}执行“{normalized_title}”，请稍候。"),
         )
         result = self._jobs.run(
             project,
@@ -720,7 +736,7 @@ class GovernorRuntime:
             "message": combine_output(error or "", ""),
         }
 
-    def remote_task(self, action_name: str) -> dict[str, Any]:
+    def remote_task(self, action_name: str, ack: str | None = None) -> dict[str, Any]:
         env, project = self._selected_project(action="running a remote action", require_idle=True)
         name = action_name.strip()
         action = next((item for item in project.remote_actions if item.name == name), None)
@@ -737,7 +753,7 @@ class GovernorRuntime:
         self._notify_once(
             env,
             "remote",
-            f"正在为 {project.display_name}执行“{action.name}”，请稍候。",
+            self._ack_or(ack, f"正在为 {project.display_name}执行“{action.name}”，请稍候。"),
         )
         result = self._remote.run(action)
         succeeded = result.exit_code == 0
