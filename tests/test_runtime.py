@@ -51,6 +51,14 @@ class FakeWorktrees:
     active: ActiveWorktree | None = None
     completed: bool = False
     reseeded: int = 0
+    push_error: str | None = None
+
+    def __post_init__(self) -> None:
+        self.pushed_projects: list[str] = []
+
+    def push_base(self, project: Project) -> str | None:
+        self.pushed_projects.append(project.project_id)
+        return self.push_error
 
     def ensure_seeded(self, active: ActiveWorktree) -> None:
         assert active == self.active
@@ -326,6 +334,7 @@ def test_prompt_context_describes_identity_flexible_project_choice_and_current_s
     assert "governor_codex_change" in context
     assert "governor_deliver_file" in context
     assert "governor_remote_task" in context
+    assert "governor_push" in context
     assert "governor_project_job" in context
     assert "只有修改代码才调用 governor_codex_change" in context
     assert "先用一行引用用户这次的原始需求原话" in context
@@ -632,6 +641,59 @@ def test_prompt_context_lists_registered_remote_action_names_after_selection() -
 
     assert "当前项目可触发的远程受控动作" in context
     assert "- 生成激活码" in context
+
+
+def test_push_remote_pushes_base_branch_when_project_allows() -> None:
+    worktrees = FakeWorktrees()
+    runtime = make_runtime(
+        worktrees=worktrees,
+        projects=(
+            Project(
+                "vpp-digital-twin",
+                "VPP数字孪生项目",
+                Path("/Users/aventador/sourceCode/vpp-digital-twin"),
+                push_on_merge=True,
+            ),
+        ),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    result = runtime.push_remote()
+
+    assert result["status"] == "pushed"
+    assert worktrees.pushed_projects == ["vpp-digital-twin"]
+
+
+def test_push_remote_is_denied_when_project_does_not_allow_push() -> None:
+    worktrees = FakeWorktrees()
+    runtime = make_runtime(worktrees=worktrees)
+    runtime.select_project("vpp-digital-twin")
+
+    with pytest.raises(PermissionError, match="push is not enabled"):
+        runtime.push_remote()
+
+    assert worktrees.pushed_projects == []
+
+
+def test_push_remote_reports_failure_reason() -> None:
+    worktrees = FakeWorktrees(push_error="push failed: connection refused")
+    runtime = make_runtime(
+        worktrees=worktrees,
+        projects=(
+            Project(
+                "vpp-digital-twin",
+                "VPP数字孪生项目",
+                Path("/Users/aventador/sourceCode/vpp-digital-twin"),
+                push_on_merge=True,
+            ),
+        ),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    result = runtime.push_remote()
+
+    assert result["status"] == "failed"
+    assert "connection refused" in result["message"]
 
 
 def test_remote_task_runs_named_action_and_returns_output() -> None:

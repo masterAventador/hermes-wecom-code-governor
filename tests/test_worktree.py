@@ -230,6 +230,34 @@ def test_push_on_merge_failure_still_reports_local_merge(tmp_path: Path) -> None
     assert not active.path.exists()
 
 
+def test_push_base_pushes_pending_commits_on_demand(tmp_path: Path) -> None:
+    repo, remote = create_repo_with_remote(tmp_path)
+    (repo / "README.md").write_text("local change\n", encoding="utf-8")
+    git(repo, "commit", "-am", "本地提交")
+    manager = WorktreeManager(tmp_path / "runtime")
+
+    error = manager.push_base(project(repo, push_on_merge=True))
+
+    assert error is None
+    remote_head = subprocess.run(
+        ["git", "--git-dir", str(remote), "rev-parse", "dev"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert remote_head == git(repo, "rev-parse", "dev")
+
+
+def test_push_base_reports_failure_message(tmp_path: Path) -> None:
+    repo, remote = create_repo_with_remote(tmp_path)
+    shutil.rmtree(remote)
+    manager = WorktreeManager(tmp_path / "runtime")
+
+    error = manager.push_base(project(repo, push_on_merge=True))
+
+    assert error is not None and "push" in error.lower()
+
+
 def test_no_push_when_flag_disabled(tmp_path: Path) -> None:
     repo, remote = create_repo_with_remote(tmp_path)
     manager = WorktreeManager(tmp_path / "runtime")

@@ -277,6 +277,14 @@ def register_runtime_components(ctx: Any, runtime: GovernorRuntime | Any) -> Non
             ),
         ),
         (
+            "governor_push",
+            "仅在用户明确要求推送时使用：把当前项目基准分支推送到远端"
+            "（带上全部未推提交）。项目未开启推送权限时会被拒绝。",
+            {},
+            [],
+            lambda _args: runtime.push_remote(),
+        ),
+        (
             "governor_remote_task",
             "触发当前项目预先登记的远程受控动作；只能按上下文清单里的登记名称触发，"
             "目标主机与命令均固定，不接受自定义命令。",

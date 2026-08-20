@@ -38,6 +38,7 @@ _GOVERNOR_TOOLS = frozenset(
         "governor_codex_change",
         "governor_project_job",
         "governor_remote_task",
+        "governor_push",
         "governor_deliver_file",
     }
 )
@@ -235,7 +236,8 @@ class GovernorRuntime:
                 "方便用户核对你的理解与需求是否一致；引用要逐字照抄用户原话，不要改写或概括。"
                 "并准确说明返回状态。合并成功后若项目开启了自动推送会一并推送远端；返回的 "
                 "message 非空表示推送失败，此时要如实告诉用户“已合并到本地，但推送远端失败”，"
-                "不要谎称已推送。",
+                "不要谎称已推送。用户明确要求推送时（如让你把本地提交推到远端），调用 "
+                "governor_push；项目未开启推送权限时它会拒绝，如实转告即可。",
                 "用户明确要求打包、测试、导出、生成产物等不修改源码的本地动作时，使用 "
                 "governor_project_job；只有修改源码才使用 governor_codex_change。任务声明了产物"
                 "时会自动完成交付，不要重复调用文件交付工具。",
@@ -662,6 +664,29 @@ class GovernorRuntime:
             "output": result.output,
             "base_commit": result.base_commit[:7],
             "artifacts": deliveries,
+        }
+
+    def push_remote(self) -> dict[str, Any]:
+        env, project = self._selected_project(action="pushing to the remote", require_idle=True)
+        if not project.push_on_merge:
+            raise PermissionError("push is not enabled for this project")
+        logger.info(
+            "governed push requested: project=%s user=%s chat=%s",
+            project.project_id,
+            env.identity.user_id,
+            env.identity.chat_id,
+        )
+        error = self._worktrees.push_base(project)
+        logger.info(
+            "governed push finished: project=%s user=%s ok=%s",
+            project.project_id,
+            env.identity.user_id,
+            error is None,
+        )
+        return {
+            "project": project.display_name,
+            "status": "pushed" if error is None else "failed",
+            "message": combine_output(error or "", ""),
         }
 
     def remote_task(self, action_name: str) -> dict[str, Any]:

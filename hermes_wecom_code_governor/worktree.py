@@ -148,18 +148,22 @@ class WorktreeManager:
         # 如实报告，让机器人告知用户“本地已合并、远端推送失败”。
         push_message = ""
         if active.project.push_on_merge:
-            push = self._run(
-                active.project.path.resolve(),
-                "git",
-                "push",
-                "origin",
-                active.base_branch,
-            )
-            if push.returncode != 0:
-                push_message = self._format_failure("push", push)
+            push_message = self.push_base(active.project) or ""
 
         self._cleanup(active)
         return CompletionResult(CompletionStatus.MERGED, message=push_message, commit=commit[:7])
+
+    def push_base(self, project: Project) -> str | None:
+        """把项目基准分支推到 origin（带上全部未推提交）。成功返回 None，失败返回原因。
+
+        合并后的自动推送与用户按需触发的手动推送共用这一条路径。
+        """
+        repo = project.path.resolve()
+        base_branch = self._select_base_branch(repo, project.base_branch)
+        push = self._run(repo, "git", "push", "origin", base_branch)
+        if push.returncode != 0:
+            return self._format_failure("push", push)
+        return None
 
     def codex_roots(self, active: ActiveWorktree) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
         worktree = active.path.resolve()

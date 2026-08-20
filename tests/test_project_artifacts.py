@@ -161,6 +161,7 @@ def test_plugin_manifest_declares_hooks_and_tools() -> None:
         "governor_codex_change",
         "governor_project_job",
         "governor_remote_task",
+        "governor_push",
         "governor_deliver_file",
     }
 
