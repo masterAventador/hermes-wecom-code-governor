@@ -292,6 +292,7 @@ def _parse_project(raw: Any, index: int) -> Project:
         ),
         job_home_seeds=_home_seeds(job_data.get("home_seeds"), f"{prefix}.job.home_seeds"),
         remote_actions=_remote_actions(data.get("remote_actions"), f"{prefix}.remote_actions"),
+        push_on_merge=_boolean_field(data.get("push_on_merge", False), f"{prefix}.push_on_merge"),
         job_unix_sockets=tuple(
             _absolute_path(value, f"{prefix}.job.unix_sockets[{socket_index}]")
             for socket_index, value in enumerate(

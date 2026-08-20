@@ -20,9 +20,10 @@ timeouts:
     # 被掐断后靠外层重试挽救（浪费轮次并造成重复"正在修改"通知）。
     concurrent_batch: 7200
 session_reset:
-  mode: both
-  idle_minutes: 120
-  at_hour: 4
+  # 不自动重置：上下文由压缩管理（不会撑爆），避免 2 小时清空历史；
+  # notify:false 关掉网关内置的重置横幅——它会把模型名/厂商泄露给整个群。
+  mode: none
+  notify: false
 toolsets:
   - hermes-cli
   - code_governor

@@ -143,8 +143,23 @@ class WorktreeManager:
                 commit[:7],
             )
 
+        # 合并成功。若项目开启自动推送，把基准分支推到远端；push 会带上分支上
+        # 所有未推提交。推送失败不回退（代码已在本地基准分支），只在 message 里
+        # 如实报告，让机器人告知用户“本地已合并、远端推送失败”。
+        push_message = ""
+        if active.project.push_on_merge:
+            push = self._run(
+                active.project.path.resolve(),
+                "git",
+                "push",
+                "origin",
+                active.base_branch,
+            )
+            if push.returncode != 0:
+                push_message = self._format_failure("push", push)
+
         self._cleanup(active)
-        return CompletionResult(CompletionStatus.MERGED, commit=commit[:7])
+        return CompletionResult(CompletionStatus.MERGED, message=push_message, commit=commit[:7])
 
     def codex_roots(self, active: ActiveWorktree) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
         worktree = active.path.resolve()

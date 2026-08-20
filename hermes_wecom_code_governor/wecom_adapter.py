@@ -71,6 +71,9 @@ def create_governed_adapter_class(runtime: GovernorRuntime):
             msg_id = str(body.get("msgid") or "").strip() if isinstance(body, dict) else ""
             if msg_id and self._dedup.is_duplicate(msg_id):
                 return
+            # 常驻记录每一次未授权 @：管理员据此拿 userid 开权限，也便于区分
+            # “消息没到达”和“到达但提示发送失败”。日志长期保留，不要去掉。
+            logger.info("未授权用户 @ 机器人 user=%s chat=%s", sender_id, chat_id)
             if msg_id:
                 # 群里无法主动发消息，必须借这条消息自带的响应通道回话。
                 self._remember_reply_req_id(msg_id, self._payload_req_id(payload))
@@ -80,9 +83,18 @@ def create_governed_adapter_class(runtime: GovernorRuntime):
                 f"chatid：{chat_id}"
             )
             try:
-                await self.send(chat_id, notice, reply_to=msg_id or None)
+                result = await self.send(chat_id, notice, reply_to=msg_id or None)
             except Exception:
-                logger.warning("未授权提示发送失败 user=%s chat=%s", sender_id, chat_id)
+                logger.warning("未授权提示发送异常 user=%s chat=%s", sender_id, chat_id)
+                return
+            # 群聊发送失败返回 success=False 而非抛异常，必须显式检查，否则静默丢失。
+            if result is not None and not getattr(result, "success", True):
+                logger.warning(
+                    "未授权提示发送失败 user=%s chat=%s error=%s",
+                    sender_id,
+                    chat_id,
+                    getattr(result, "error", None),
+                )
 
         def _is_dm_allowed(self, sender_id: str) -> bool:
             principal = str(sender_id or "").strip()
@@ -233,12 +245,20 @@ def create_governed_adapter_class(runtime: GovernorRuntime):
 
         async def _dispatch_payload(self, payload: dict[str, Any]) -> None:
             loop = asyncio.get_running_loop()
+            body = payload.get("body")
+            trigger_msg_id = str(body.get("msgid") or "").strip() if isinstance(body, dict) else ""
 
             def notify(identity: Identity, content: str) -> None:
                 if not identity.chat_id or loop.is_closed():
                     return
+                # 绑定触发消息，让“正在修改/正在执行”这类提示在群里引用用户那句话，
+                # 而不是显示成一条无出处的独立消息。
                 future = asyncio.run_coroutine_threadsafe(
-                    self.send(chat_id=identity.chat_id, content=content),
+                    self.send(
+                        chat_id=identity.chat_id,
+                        content=content,
+                        reply_to=trigger_msg_id or None,
+                    ),
                     loop,
                 )
 

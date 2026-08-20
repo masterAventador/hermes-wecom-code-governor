@@ -32,6 +32,8 @@ projects:
     name: VPP数字孪生项目
     path: /Users/aventador/sourceCode/vpp-digital-twin
     base_branch: main
+    # 合并到 main 成功后自动 git push origin main（会带上分支上所有未推提交）。
+    push_on_merge: true
     validation_commands:
       - [npm, test]
     remote_actions:

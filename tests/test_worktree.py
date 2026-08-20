@@ -186,6 +186,69 @@ def test_begin_requires_clean_base_checkout_on_the_base_branch(tmp_path: Path) -
         manager.begin(project(repo), "0817-task")
 
 
+def create_repo_with_remote(tmp_path: Path) -> tuple[Path, Path]:
+    repo = create_repo(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    git(repo, "remote", "add", "origin", str(remote))
+    git(repo, "push", "-u", "origin", "dev")
+    return repo, remote
+
+
+def test_push_on_merge_pushes_base_branch_to_remote(tmp_path: Path) -> None:
+    repo, remote = create_repo_with_remote(tmp_path)
+    manager = WorktreeManager(tmp_path / "runtime")
+    active = manager.begin(project(repo, push_on_merge=True), "0820-push")
+    (active.path / "README.md").write_text("changed\n", encoding="utf-8")
+
+    result = manager.complete(active, SafetyLimits(max_changed_files=10, max_deleted_files=2))
+
+    assert result.status is CompletionStatus.MERGED
+    assert result.message == ""
+    remote_head = subprocess.run(
+        ["git", "--git-dir", str(remote), "rev-parse", "dev"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert remote_head == git(repo, "rev-parse", "dev")
+
+
+def test_push_on_merge_failure_still_reports_local_merge(tmp_path: Path) -> None:
+    repo, remote = create_repo_with_remote(tmp_path)
+    shutil.rmtree(remote)  # 远端消失，push 必失败
+    manager = WorktreeManager(tmp_path / "runtime")
+    active = manager.begin(project(repo, push_on_merge=True), "0820-push-fail")
+    (active.path / "README.md").write_text("changed\n", encoding="utf-8")
+
+    result = manager.complete(active, SafetyLimits(max_changed_files=10, max_deleted_files=2))
+
+    assert result.status is CompletionStatus.MERGED
+    assert "push" in result.message.lower()
+    # 本地合并已完成：dev 上有机器人这次提交，worktree 和任务分支照常清理。
+    assert git(repo, "log", "-1", "--format=%s", "dev") == "机器人：0820-push-fail"
+    assert not active.path.exists()
+
+
+def test_no_push_when_flag_disabled(tmp_path: Path) -> None:
+    repo, remote = create_repo_with_remote(tmp_path)
+    manager = WorktreeManager(tmp_path / "runtime")
+    active = manager.begin(project(repo), "0820-nopush")
+    (active.path / "README.md").write_text("changed\n", encoding="utf-8")
+
+    result = manager.complete(active, SafetyLimits(max_changed_files=10, max_deleted_files=2))
+
+    assert result.status is CompletionStatus.MERGED
+    remote_head = subprocess.run(
+        ["git", "--git-dir", str(remote), "rev-parse", "dev"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    # 远端仍停在初始提交，本地已领先
+    assert remote_head != git(repo, "rev-parse", "dev")
+
+
 def test_successful_validation_fast_forwards_base_and_cleans_worktree(tmp_path: Path) -> None:
     repo = create_repo(tmp_path)
     manager = WorktreeManager(tmp_path / "runtime")

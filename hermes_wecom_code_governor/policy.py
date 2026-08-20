@@ -38,6 +38,7 @@ class Project:
     job_home_seeds: tuple[tuple[Path, Path], ...] = ()
     job_unix_sockets: tuple[Path, ...] = ()
     remote_actions: tuple[RemoteAction, ...] = ()
+    push_on_merge: bool = False
     auto_discovered: bool = False
 
 

@@ -328,6 +328,7 @@ def test_prompt_context_describes_identity_flexible_project_choice_and_current_s
     assert "governor_remote_task" in context
     assert "governor_project_job" in context
     assert "只有修改代码才调用 governor_codex_change" in context
+    assert "先用一行引用用户这次的原始需求原话" in context
     assert "打包、测试、导出" in context
     assert "不要自行使用外层原生文件或终端工具" not in context
     assert "argv 数组" not in context

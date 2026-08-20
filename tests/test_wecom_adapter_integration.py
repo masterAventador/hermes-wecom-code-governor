@@ -156,6 +156,28 @@ def test_wecom_intake_uses_governor_permission_users_instead_of_a_copied_user_li
     assert not adapter._is_group_allowed("any-chat", "stranger")
 
 
+def test_runtime_notice_quotes_the_triggering_message() -> None:
+    runtime = FakeRuntime()
+    adapter_class = create_governed_adapter_class(runtime)
+    adapter = adapter_class(PlatformConfig(enabled=True, extra={"bot_id": "id", "secret": "s"}))
+    adapter.send = AsyncMock()
+    base_class = type(adapter).__mro__[1]
+
+    async def exercise() -> None:
+        with patch.object(base_class, "_dispatch_payload", new=AsyncMock()):
+            await adapter._dispatch_payload(
+                message_payload(user_id="trusted-user", msg_id="trigger-1")
+            )
+        assert runtime.notifier is not None
+        await asyncio.to_thread(runtime.notifier, runtime.identity, "正在修改 X，请稍候。")
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+
+    call = adapter.send.await_args
+    assert call.kwargs.get("reply_to") == "trigger-1"
+
+
 def test_runtime_notice_is_delivered_as_a_plain_chat_message() -> None:
     runtime = FakeRuntime()
     adapter_class = create_governed_adapter_class(runtime)
@@ -223,6 +245,40 @@ def test_unauthorized_group_mention_replies_ids_every_time_and_never_reaches_bas
     assert "stranger-9" in first.args[1]
     assert "chat-1" in first.args[1]
     assert first.kwargs.get("reply_to") == "msg-1"
+
+
+def test_unauthorized_mention_is_logged_for_observability(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from gateway.platforms.base import SendResult
+
+    runtime = FakeRuntime()
+    adapter_class = create_governed_adapter_class(runtime)
+    adapter = adapter_class(PlatformConfig(enabled=True, extra={"bot_id": "id", "secret": "s"}))
+    adapter.send = AsyncMock(return_value=SendResult(success=True))
+
+    with caplog.at_level("INFO", logger="hermes_wecom_code_governor.wecom_adapter"):
+        asyncio.run(adapter._on_message(message_payload(user_id="stranger-9", msg_id="m-1")))
+
+    logged = [record.getMessage() for record in caplog.records]
+    assert any("未授权" in message and "stranger-9" in message for message in logged)
+
+
+def test_unauthorized_notice_send_failure_is_logged_not_swallowed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from gateway.platforms.base import SendResult
+
+    runtime = FakeRuntime()
+    adapter_class = create_governed_adapter_class(runtime)
+    adapter = adapter_class(PlatformConfig(enabled=True, extra={"bot_id": "id", "secret": "s"}))
+    adapter.send = AsyncMock(return_value=SendResult(success=False, error="no reply channel"))
+
+    with caplog.at_level("WARNING", logger="hermes_wecom_code_governor.wecom_adapter"):
+        asyncio.run(adapter._on_message(message_payload(user_id="stranger-9", msg_id="m-2")))
+
+    warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    assert any("no reply channel" in message for message in warnings)
 
 
 def test_unauthorized_dm_notice_uses_sender_as_chat_id() -> None:

@@ -43,6 +43,7 @@ projects:
     readable_paths:
       - /opt/homebrew
       - /System/Cryptexes
+    push_on_merge: true
     remote_actions:
       - name: 生成激活码
         host: root@license.example
@@ -106,6 +107,8 @@ permissions:
             timeout_seconds=45,
         ),
     )
+    assert vpp.push_on_merge is True
+    assert config.policy.project("aijd-demo").push_on_merge is False
     assert vpp.job_artifact_globs == ("release/*.exe",)
     assert vpp.job_timeout_seconds == 1800
     assert vpp.seed_paths == ("node_modules",)
