@@ -343,6 +343,8 @@ def test_prompt_context_describes_identity_flexible_project_choice_and_current_s
     assert "governor_remote_task" in context
     assert "governor_push" in context
     assert "governor_project_job" in context
+    # 下载链接的展示文字用中文描述，不把原始文件名当链接文案。
+    assert "链接的显示文字用中文描述" in context
     assert "只有修改代码才调用 governor_codex_change" in context
     assert "先用一行引用用户这次的原始需求原话" in context
     assert "打包、测试、导出" in context
