@@ -278,6 +278,9 @@ def _parse_project(raw: Any, index: int) -> Project:
             job_data.get("allowed_commands"), f"{prefix}.job.allowed_commands"
         ),
         job_gui_commands=_commands(job_data.get("gui_commands"), f"{prefix}.job.gui_commands"),
+        job_network_commands=_commands(
+            job_data.get("network_commands"), f"{prefix}.job.network_commands"
+        ),
         job_environment=_job_environment(job_data.get("environment"), f"{prefix}.job.environment"),
         job_artifact_globs=_relative_paths(
             job_data.get("artifact_globs"), f"{prefix}.job.artifact_globs"

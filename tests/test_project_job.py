@@ -156,6 +156,55 @@ def test_seatbelt_gui_executor_confines_writes_and_network_but_allows_gui(
     assert environment["HOME"] == str(home.resolve())
 
 
+def test_seatbelt_executor_can_allow_outbound_network_for_registered_commands(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    temporary = tmp_path / "tmp"
+    for path in (workspace, home, temporary):
+        path.mkdir()
+    request = JobExecutionRequest(
+        cwd=workspace,
+        home=home,
+        temporary=temporary,
+        argv=("npm", "run", "build:mac"),
+        timeout_seconds=120,
+    )
+
+    confined = SeatbeltGuiExecutor(denied_read_paths=())
+    networked = SeatbeltGuiExecutor(denied_read_paths=(), allow_network=True)
+
+    confined_profile = confined.build_command(request)[2]
+    networked_profile = networked.build_command(request)[2]
+    assert "(deny network*)" in confined_profile
+    # 出网档：不再整体禁网（签名公证要访问苹果服务），写入与密钥拒读约束不变
+    assert "(deny network*)" not in networked_profile
+    assert "(deny file-write*)" in networked_profile
+    assert f'(deny file-read* (subpath "{(Path.home() / ".ssh").resolve()}"))' in networked_profile
+
+
+def test_network_marked_commands_run_on_the_networked_executor(tmp_path: Path) -> None:
+    repo = create_repo(tmp_path)
+    default_executor = FakeExecutor()
+    gui_executor = FakeExecutor()
+    network_executor = FakeExecutor()
+    runner = ProjectJobRunner(
+        tmp_path / "runtime",
+        executor=default_executor,
+        gui_executor=gui_executor,
+        network_executor=network_executor,
+    )
+    configured = project(repo, job_network_commands=(("./build-artifact",),))
+
+    result = runner.run(configured, job_id="0820-net", argv=("./build-artifact",))
+
+    assert result.status == "completed"
+    assert len(network_executor.requests) == 1
+    assert default_executor.requests == []
+    assert gui_executor.requests == []
+
+
 def test_project_environment_reaches_executor_with_job_home_resolved(tmp_path: Path) -> None:
     repo = create_repo(tmp_path)
     executor = FakeExecutor()

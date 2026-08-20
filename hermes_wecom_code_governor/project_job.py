@@ -166,17 +166,24 @@ class SeatbeltGuiExecutor:
     这里用共享的 seatbelt profile（默认放行 + 定点收紧）承接需要拉起
     窗口进程的受控任务（如 Electron 静默截图）。"""
 
-    def __init__(self, denied_read_paths: tuple[Path, ...] = ()) -> None:
+    def __init__(
+        self,
+        denied_read_paths: tuple[Path, ...] = (),
+        *,
+        allow_network: bool = False,
+    ) -> None:
         sandbox_exec = shutil.which("sandbox-exec")
         if sandbox_exec is None:
             raise RuntimeError("sandbox-exec is required for governed GUI jobs")
         self._sandbox_exec = sandbox_exec
         self._denied_read_paths = denied_read_paths
+        self._allow_network = allow_network
 
     def build_command(self, request: JobExecutionRequest) -> tuple[str, ...]:
         profile = build_seatbelt_profile(
             (request.cwd, request.home, request.temporary),
             self._denied_read_paths,
+            allow_outbound_network=self._allow_network,
         )
         return (self._sandbox_exec, "-p", profile, *request.argv)
 
@@ -242,6 +249,7 @@ class ProjectJobRunner:
         *,
         executor: JobExecutor | None = None,
         gui_executor: JobExecutor | None = None,
+        network_executor: JobExecutor | None = None,
         codex_binary: Path | None = None,
     ) -> None:
         self.runtime_root = runtime_root.resolve()
@@ -260,6 +268,13 @@ class ProjectJobRunner:
                 denied_read_paths=(self.runtime_root.parent / "hermes-home",)
             )
         self._gui_executor = gui_executor
+        if network_executor is None:
+            # 出网档：签名公证等登记动作需要访问外部服务，写入/密钥约束不变。
+            network_executor = SeatbeltGuiExecutor(
+                denied_read_paths=(self.runtime_root.parent / "hermes-home",),
+                allow_network=True,
+            )
+        self._network_executor = network_executor
 
     def run(
         self,
@@ -287,9 +302,12 @@ class ProjectJobRunner:
         self._git(repo, "worktree", "add", "--detach", str(workspace), base_branch)
         home.mkdir(parents=True)
         temporary.mkdir(parents=True)
-        executor = (
-            self._gui_executor if _matches_any(project.job_gui_commands, argv) else self._executor
-        )
+        if _matches_any(project.job_network_commands, argv):
+            executor = self._network_executor
+        elif _matches_any(project.job_gui_commands, argv):
+            executor = self._gui_executor
+        else:
+            executor = self._executor
         try:
             self._seed_job(project, workspace, home)
             execution = executor.run(
