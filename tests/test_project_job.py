@@ -184,6 +184,102 @@ def test_seatbelt_executor_can_allow_outbound_network_for_registered_commands(
     assert f'(deny file-read* (subpath "{(Path.home() / ".ssh").resolve()}"))' in networked_profile
 
 
+def test_disk_image_profile_permits_device_and_volume_writes_only_when_enabled(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    temporary = tmp_path / "tmp"
+    for path in (workspace, home, temporary):
+        path.mkdir()
+    request = JobExecutionRequest(
+        cwd=workspace,
+        home=home,
+        temporary=temporary,
+        argv=("npm", "run", "build:mac"),
+        timeout_seconds=120,
+    )
+
+    packaging = SeatbeltGuiExecutor(
+        denied_read_paths=(), allow_network=True, allow_disk_images=True
+    )
+    plain_network = SeatbeltGuiExecutor(denied_read_paths=(), allow_network=True)
+
+    packaging_profile = packaging.build_command(request)[2]
+    plain_profile = plain_network.build_command(request)[2]
+    # 打包档：DMG 生成需要写虚拟磁盘设备节点并往挂载卷里拷文件。
+    assert '(allow file-write* (regex #"^/dev/r?disk[0-9]"))' in packaging_profile
+    assert '(allow file-write* (subpath "/Volumes"))' in packaging_profile
+    # 其他档一律不放行磁盘设备与挂载卷。
+    assert "/dev/r?disk" not in plain_profile
+    assert '(subpath "/Volumes")' not in plain_profile
+
+
+def test_runner_wires_disk_images_into_the_networked_executor_only(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    temporary = tmp_path / "tmp"
+    for path in (workspace, home, temporary):
+        path.mkdir()
+    runner = ProjectJobRunner(tmp_path / "runtime", codex_binary=Path("/usr/bin/true"))
+    request = JobExecutionRequest(
+        cwd=workspace,
+        home=home,
+        temporary=temporary,
+        argv=("npm", "run", "build:mac"),
+        timeout_seconds=120,
+    )
+
+    # 出厂装配门禁：出网打包档必须带磁盘镜像能力，GUI 档必须不带。
+    networked_profile = runner._network_executor.build_command(request)[2]
+    gui_profile = runner._gui_executor.build_command(request)[2]
+    assert '(allow file-write* (subpath "/Volumes"))' in networked_profile
+    assert '(subpath "/Volumes")' not in gui_profile
+
+
+def test_hdiutil_creates_a_filesystem_image_inside_the_packaging_sandbox(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    temporary = tmp_path / "tmp"
+    for path in (workspace, home, temporary):
+        path.mkdir()
+
+    def create_request(name: str) -> JobExecutionRequest:
+        return JobExecutionRequest(
+            cwd=workspace,
+            home=home,
+            temporary=temporary,
+            argv=(
+                "hdiutil",
+                "create",
+                "-size",
+                "2m",
+                "-fs",
+                "HFS+",
+                "-volname",
+                "GovernorTest",
+                "-ov",
+                str(workspace / name),
+            ),
+            timeout_seconds=120,
+        )
+
+    packaging = SeatbeltGuiExecutor(
+        denied_read_paths=(), allow_network=True, allow_disk_images=True
+    )
+    outcome = packaging.run(create_request("allowed.dmg"))
+    assert outcome.exit_code == 0, outcome.stderr
+    assert (workspace / "allowed.dmg").exists()
+
+    # 对照：未开磁盘镜像的出网档必须仍拦住同一命令，证明本测试能给出否定答案。
+    plain_network = SeatbeltGuiExecutor(denied_read_paths=(), allow_network=True)
+    denied = plain_network.run(create_request("denied.dmg"))
+    assert denied.exit_code != 0
+    assert not (workspace / "denied.dmg").exists()
+
+
 def test_network_marked_commands_run_on_the_networked_executor(tmp_path: Path) -> None:
     repo = create_repo(tmp_path)
     default_executor = FakeExecutor()

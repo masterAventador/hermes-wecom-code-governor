@@ -171,6 +171,7 @@ class SeatbeltGuiExecutor:
         denied_read_paths: tuple[Path, ...] = (),
         *,
         allow_network: bool = False,
+        allow_disk_images: bool = False,
     ) -> None:
         sandbox_exec = shutil.which("sandbox-exec")
         if sandbox_exec is None:
@@ -178,12 +179,14 @@ class SeatbeltGuiExecutor:
         self._sandbox_exec = sandbox_exec
         self._denied_read_paths = denied_read_paths
         self._allow_network = allow_network
+        self._allow_disk_images = allow_disk_images
 
     def build_command(self, request: JobExecutionRequest) -> tuple[str, ...]:
         profile = build_seatbelt_profile(
             (request.cwd, request.home, request.temporary),
             self._denied_read_paths,
             allow_outbound_network=self._allow_network,
+            allow_disk_images=self._allow_disk_images,
         )
         return (self._sandbox_exec, "-p", profile, *request.argv)
 
@@ -269,10 +272,12 @@ class ProjectJobRunner:
             )
         self._gui_executor = gui_executor
         if network_executor is None:
-            # 出网档：签名公证等登记动作需要访问外部服务，写入/密钥约束不变。
+            # 出网档＝打包档：签名公证要访问外部服务，DMG 生成要写虚拟磁盘
+            # 设备与挂载卷；写入/密钥约束不变。
             network_executor = SeatbeltGuiExecutor(
                 denied_read_paths=(self.runtime_root.parent / "hermes-home",),
                 allow_network=True,
+                allow_disk_images=True,
             )
         self._network_executor = network_executor
 
