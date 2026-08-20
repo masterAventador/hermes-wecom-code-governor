@@ -114,9 +114,9 @@ class GovernorRuntime:
         self._remote = remote
         self._notifier = notifier
         self._pending_deliveries: dict[str, deque[ArtifactDelivery]] = defaultdict(deque)
-        # 工具超时后外层会带同一条消息重试 codex_change；按 message_id 去重，
-        # 避免用户在群里收到重复的"正在修改"提示。
-        self._codex_notice_messages: dict[str, str] = {}
+        # 工具被拒或超时后外层会带同一条消息重试；按 (通知类别, 会话) 记录已提示
+        # 的 message_id 去重，避免用户收到重复的"请稍候"提示。
+        self._notice_messages: dict[tuple[str, str], str] = {}
         if now is None:
             from datetime import datetime
 
@@ -130,13 +130,23 @@ class GovernorRuntime:
     def set_notifier(self, notifier: Callable[[Identity, str], None]) -> None:
         self._notifier = notifier
 
-    def _notify(self, identity: Identity, message: str) -> None:
+    def _notify(self, identity: Identity, message: str) -> bool:
         if self._notifier is None:
-            return
+            return False
         try:
             self._notifier(identity, message)
         except Exception:
+            return False
+        return True
+
+    def _notify_once(self, env: SessionEnvironment, kind: str, message: str) -> None:
+        """同一条触发消息只发一次某类提示；无 message_id 时退化为每次都发。"""
+        key = (kind, env.session_key)
+        if env.message_id and self._notice_messages.get(key) == env.message_id:
             return
+        # 发送失败不记"已提示"，让同一条消息的下次重试把提示补上。
+        if self._notify(env.identity, message) and env.message_id:
+            self._notice_messages[key] = env.message_id
 
     def pre_gateway_dispatch(self, event: object, **_: Any) -> dict[str, str]:
         source = getattr(event, "source", None)
@@ -550,10 +560,7 @@ class GovernorRuntime:
         if resumed:
             self._worktrees.ensure_seeded(active)
         readable, writable = self._worktrees.codex_roots(active)
-        if not env.message_id or self._codex_notice_messages.get(env.session_key) != env.message_id:
-            self._notify(env.identity, f"正在修改 {active.project.display_name}，请稍候。")
-            if env.message_id:
-                self._codex_notice_messages[env.session_key] = env.message_id
+        self._notify_once(env, "codex", f"正在修改 {active.project.display_name}，请稍候。")
         result = self._codex.run(
             CodexRunRequest(
                 mode=CodexMode.WRITE,
@@ -621,15 +628,30 @@ class GovernorRuntime:
         if not normalized_title or len(normalized_title) > 12:
             raise ValueError("job title must contain 1 to 12 characters")
         command = tuple(argv)
-        requested_artifacts = tuple(artifact_globs or ())
-        if requested_artifacts and self._delivery is None:
-            raise RuntimeError("file delivery is not configured for generated artifacts")
+        # 模型不传产物 glob 时回退到项目登记的全部产物（宽松模式：任务没产出
+        # 该类产物不算失败），避免打包类任务成功却无交付、测试类任务被误伤。
+        explicit_artifacts = bool(artifact_globs)
+        requested_artifacts = (
+            tuple(artifact_globs) if explicit_artifacts else project.job_artifact_globs
+        )
+        if self._delivery is None:
+            if explicit_artifacts:
+                raise RuntimeError("file delivery is not configured for generated artifacts")
+            requested_artifacts = ()
         month, day = self._now()
         task_id = build_task_id(normalized_title, month=month, day=day)
         message_suffix = hashlib.sha256(env.message_id.encode("utf-8")).hexdigest()[:10]
         job_id = f"{task_id}--{message_suffix}"
-        self._notify(
-            env.identity,
+        # 先校验再提示：参数被拒的调用不应对用户放出"请稍候"。
+        self._jobs.validate(
+            project,
+            job_id=job_id,
+            argv=command,
+            artifact_globs=requested_artifacts,
+        )
+        self._notify_once(
+            env,
+            "job",
             f"正在为 {project.display_name}执行“{normalized_title}”，请稍候。",
         )
         result = self._jobs.run(
@@ -637,6 +659,7 @@ class GovernorRuntime:
             job_id=job_id,
             argv=command,
             artifact_globs=requested_artifacts,
+            require_artifacts=explicit_artifacts,
         )
         deliveries: list[dict[str, str | int | None]] = []
         if result.status == "completed" and result.artifacts:
@@ -657,7 +680,7 @@ class GovernorRuntime:
                         "download_url": delivery.download_url,
                     }
                 )
-        return {
+        reply: dict[str, Any] = {
             "task_id": task_id,
             "status": result.status,
             "exit_code": result.exit_code,
@@ -665,6 +688,14 @@ class GovernorRuntime:
             "base_commit": result.base_commit[:7],
             "artifacts": deliveries,
         }
+        if result.status == "completed" and requested_artifacts and not result.artifacts:
+            # 宽松模式下命令成功却零产出（例如打包配置漂移）不能被说成干净的成功。
+            reply["warning"] = (
+                "任务成功结束，但没有产出任何已登记的交付产物"
+                f"（预期匹配：{', '.join(requested_artifacts)}）。"
+                "必须向用户如实说明没有可交付文件。"
+            )
+        return reply
 
     def push_remote(self) -> dict[str, Any]:
         env, project = self._selected_project(action="pushing to the remote", require_idle=True)
@@ -703,8 +734,9 @@ class GovernorRuntime:
             env.identity.user_id,
             env.identity.chat_id,
         )
-        self._notify(
-            env.identity,
+        self._notify_once(
+            env,
+            "remote",
             f"正在为 {project.display_name}执行“{action.name}”，请稍候。",
         )
         result = self._remote.run(action)

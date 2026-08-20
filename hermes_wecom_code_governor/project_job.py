@@ -283,8 +283,9 @@ class ProjectJobRunner:
         job_id: str,
         argv: tuple[str, ...],
         artifact_globs: tuple[str, ...] = (),
+        require_artifacts: bool = True,
     ) -> ProjectJobResult:
-        self._validate_request(project, job_id, argv, artifact_globs)
+        self.validate(project, job_id=job_id, argv=argv, artifact_globs=artifact_globs)
         repo = project.path.resolve()
         self._require_git_repository(repo)
         if self._git(repo, "status", "--porcelain"):
@@ -330,7 +331,12 @@ class ProjectJobRunner:
                     output=output,
                     base_commit=base_commit,
                 )
-            artifacts = self._stage_artifacts(workspace, job_id, artifact_globs)
+            artifacts = self._stage_artifacts(
+                workspace,
+                job_id,
+                artifact_globs,
+                require_artifacts=require_artifacts,
+            )
             return ProjectJobResult(
                 status="completed",
                 exit_code=0,
@@ -364,6 +370,8 @@ class ProjectJobRunner:
         workspace: Path,
         job_id: str,
         artifact_globs: tuple[str, ...],
+        *,
+        require_artifacts: bool = True,
     ) -> tuple[Path, ...]:
         if not artifact_globs:
             return ()
@@ -386,15 +394,20 @@ class ProjectJobRunner:
                 shutil.copy2(resolved, destination)
                 staged.append(destination)
         if not staged:
-            raise FileNotFoundError("configured job artifact was not produced")
+            # 回退来的 glob（require_artifacts=False）允许任务本身不产出该类产物，
+            # 例如登记了打包产物的项目跑纯测试命令；显式请求的 glob 仍严格要求产出。
+            if require_artifacts:
+                raise FileNotFoundError("configured job artifact was not produced")
+            return ()
         return tuple(staged)
 
     @staticmethod
-    def _validate_request(
+    def validate(
         project: Project,
+        *,
         job_id: str,
         argv: tuple[str, ...],
-        artifact_globs: tuple[str, ...],
+        artifact_globs: tuple[str, ...] = (),
     ) -> None:
         if not _SAFE_JOB_ID.fullmatch(job_id):
             raise ValueError("job id may only contain letters, numbers, dot, dash and underscore")
@@ -411,7 +424,10 @@ class ProjectJobRunner:
                 or ".." in pure.parts
                 or ".git" in pure.parts
             ):
-                raise PermissionError("artifact glob is not allowed for this project")
+                raise PermissionError(
+                    "artifact glob is not allowed for this project; allowed: "
+                    + (", ".join(sorted(allowed_globs)) or "none")
+                )
         require_safe_seed_paths(project.seed_paths)
         for _, target in project.job_home_seeds:
             if target.is_absolute() or ".." in target.parts:

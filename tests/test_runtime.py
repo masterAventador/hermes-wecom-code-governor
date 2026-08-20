@@ -122,9 +122,16 @@ class FakeDelivery:
 @dataclass
 class FakeJobs:
     result: ProjectJobResult
+    validate_error: Exception | None = None
 
     def __post_init__(self) -> None:
         self.calls: list[tuple[Project, dict[str, object]]] = []
+        self.validate_calls: list[tuple[Project, dict[str, object]]] = []
+
+    def validate(self, project: Project, **kwargs: object) -> None:
+        self.validate_calls.append((project, kwargs))
+        if self.validate_error is not None:
+            raise self.validate_error
 
     def run(self, project: Project, **kwargs: object) -> ProjectJobResult:
         self.calls.append((project, kwargs))
@@ -610,11 +617,264 @@ def test_project_job_runs_without_inner_codex_and_queues_generated_artifact(
     assert str(job_args["job_id"]).startswith("0817-生成安装包--")
     assert job_args["argv"] == ("npm", "run", "build:win")
     assert job_args["artifact_globs"] == ("release/*.exe",)
+    # 显式请求的 glob 严格要求产出。
+    assert job_args["require_artifacts"] is True
     staged_path, staging_root, message_id = delivery.calls[0]
     assert staged_path == artifact
     assert staging_root == artifact.parent
     assert message_id == "message-1"
     assert runtime.take_pending_delivery("message-1") == delivery_result
+
+
+def test_rejected_project_job_sends_no_notice_and_retry_notifies_once() -> None:
+    jobs = FakeJobs(
+        ProjectJobResult(
+            status="completed",
+            exit_code=0,
+            output="ok",
+            base_commit="a" * 40,
+        ),
+        validate_error=PermissionError("artifact glob is not allowed for this project"),
+    )
+    notices: list[str] = []
+    runtime = make_runtime(
+        jobs=jobs,
+        delivery=FakeDelivery(
+            ArtifactDelivery(
+                message_id="message-1",
+                channel="cos",
+                path=Path("/tmp/unused.dmg"),
+                filename="unused.dmg",
+                size_bytes=1,
+                download_url=None,
+            )
+        ),
+        notifier=lambda _identity, text: notices.append(text),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    with pytest.raises(PermissionError):
+        runtime.project_job(
+            argv=["npm", "run", "build:mac"],
+            artifact_globs=["dist/*.dmg"],
+            title="打包Mac安装包",
+        )
+
+    # 参数被拒的调用不能对用户放出“请稍候”。
+    assert notices == []
+    assert jobs.calls == []
+
+    jobs.validate_error = None
+    runtime.project_job(argv=["npm", "run", "build:mac"], title="打包Mac安装包")
+    runtime.project_job(argv=["npm", "run", "build:mac"], title="打包Mac安装包")
+
+    # 同一条触发消息内的重试只提示一次。
+    assert notices == ["正在为 VPP数字孪生项目执行“打包Mac安装包”，请稍候。"]
+
+
+def test_project_job_defaults_artifact_globs_to_the_project_allowlist() -> None:
+    jobs = FakeJobs(
+        ProjectJobResult(
+            status="completed",
+            exit_code=0,
+            output="ok",
+            base_commit="a" * 40,
+        )
+    )
+    delivery = FakeDelivery(
+        ArtifactDelivery(
+            message_id="message-1",
+            channel="cos",
+            path=Path("/tmp/unused.dmg"),
+            filename="unused.dmg",
+            size_bytes=1,
+            download_url=None,
+        )
+    )
+    runtime = make_runtime(
+        jobs=jobs,
+        delivery=delivery,
+        projects=(
+            Project(
+                "vpp-digital-twin",
+                "VPP数字孪生项目",
+                Path("/Users/aventador/sourceCode/vpp-digital-twin"),
+                job_allowed_commands=(("npm", "run", "build:mac"),),
+                job_artifact_globs=("release/*.dmg",),
+            ),
+        ),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    runtime.project_job(argv=["npm", "run", "build:mac"], title="打包Mac安装包")
+
+    _, job_args = jobs.calls[0]
+    assert job_args["artifact_globs"] == ("release/*.dmg",)
+    # 回退来的 glob 走宽松模式：任务没产出该类产物时不算失败。
+    assert job_args["require_artifacts"] is False
+    # 校验和执行必须拿到同一份 glob，否则白名单校验形同虚设。
+    _, validate_args = jobs.validate_calls[0]
+    assert validate_args["artifact_globs"] == job_args["artifact_globs"]
+
+
+def test_fallback_globs_are_dropped_when_delivery_is_not_configured() -> None:
+    jobs = FakeJobs(
+        ProjectJobResult(
+            status="completed",
+            exit_code=0,
+            output="tests passed",
+            base_commit="a" * 40,
+        )
+    )
+    runtime = make_runtime(
+        jobs=jobs,
+        projects=(
+            Project(
+                "vpp-digital-twin",
+                "VPP数字孪生项目",
+                Path("/Users/aventador/sourceCode/vpp-digital-twin"),
+                job_allowed_commands=(("npm", "test"),),
+                job_artifact_globs=("release/*.dmg",),
+            ),
+        ),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    # delivery 未配置时回退 glob 直接清空，跑测试类任务不应因此被拒。
+    result = runtime.project_job(argv=["npm", "test"], title="跑测试")
+
+    assert result["status"] == "completed"
+    _, job_args = jobs.calls[0]
+    assert job_args["artifact_globs"] == ()
+
+
+def test_completed_job_with_expected_but_missing_artifacts_carries_a_warning() -> None:
+    jobs = FakeJobs(
+        ProjectJobResult(
+            status="completed",
+            exit_code=0,
+            output="build done",
+            base_commit="a" * 40,
+        )
+    )
+    delivery = FakeDelivery(
+        ArtifactDelivery(
+            message_id="message-1",
+            channel="cos",
+            path=Path("/tmp/unused.dmg"),
+            filename="unused.dmg",
+            size_bytes=1,
+            download_url=None,
+        )
+    )
+    runtime = make_runtime(
+        jobs=jobs,
+        delivery=delivery,
+        projects=(
+            Project(
+                "vpp-digital-twin",
+                "VPP数字孪生项目",
+                Path("/Users/aventador/sourceCode/vpp-digital-twin"),
+                job_allowed_commands=(("npm", "run", "build:mac"),),
+                job_artifact_globs=("release/*.dmg",),
+            ),
+        ),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    # 打包命令 exit 0 却没产出任何登记产物：不能被说成一次干净的成功。
+    result = runtime.project_job(argv=["npm", "run", "build:mac"], title="打包Mac安装包")
+
+    assert result["status"] == "completed"
+    assert result["artifacts"] == []
+    assert "release/*.dmg" in result["warning"]
+
+
+def test_completed_job_without_registered_globs_carries_no_warning() -> None:
+    jobs = FakeJobs(
+        ProjectJobResult(
+            status="completed",
+            exit_code=0,
+            output="tests passed",
+            base_commit="a" * 40,
+        )
+    )
+    runtime = make_runtime(jobs=jobs)
+    runtime.select_project("vpp-digital-twin")
+
+    result = runtime.project_job(argv=["npm", "test"], title="跑测试")
+
+    assert "warning" not in result
+
+
+def test_job_and_remote_notices_on_the_same_message_do_not_suppress_each_other() -> None:
+    jobs = FakeJobs(
+        ProjectJobResult(
+            status="completed",
+            exit_code=0,
+            output="ok",
+            base_commit="a" * 40,
+        )
+    )
+    remote = FakeRemote()
+    notices: list[str] = []
+    runtime = make_runtime(
+        jobs=jobs,
+        remote=remote,
+        projects=(
+            Project(
+                "vpp-digital-twin",
+                "VPP数字孪生项目",
+                Path("/Users/aventador/sourceCode/vpp-digital-twin"),
+                job_allowed_commands=(("npm", "test"),),
+                remote_actions=(
+                    RemoteAction(
+                        name="生成激活码",
+                        host="root@license.example",
+                        argv=("node", "/opt/vpp-license/issue.mjs"),
+                    ),
+                ),
+            ),
+        ),
+        notifier=lambda _identity, text: notices.append(text),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    runtime.project_job(argv=["npm", "test"], title="跑测试")
+    runtime.remote_task("生成激活码")
+
+    assert notices == [
+        "正在为 VPP数字孪生项目执行“跑测试”，请稍候。",
+        "正在为 VPP数字孪生项目执行“生成激活码”，请稍候。",
+    ]
+
+
+def test_failed_notice_delivery_is_retried_on_the_next_attempt() -> None:
+    jobs = FakeJobs(
+        ProjectJobResult(
+            status="completed",
+            exit_code=0,
+            output="ok",
+            base_commit="a" * 40,
+        )
+    )
+    notices: list[str] = []
+    attempts = {"count": 0}
+
+    def flaky_notifier(_identity: Identity, text: str) -> None:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("wecom send failed")
+        notices.append(text)
+
+    runtime = make_runtime(jobs=jobs, notifier=flaky_notifier)
+    runtime.select_project("vpp-digital-twin")
+
+    runtime.project_job(argv=["npm", "run", "build:mac"], title="打包Mac安装包")
+    runtime.project_job(argv=["npm", "run", "build:mac"], title="打包Mac安装包")
+
+    # 首次发送失败不能记成"已提示"，同一条消息的重试要把提示补上。
+    assert notices == ["正在为 VPP数字孪生项目执行“打包Mac安装包”，请稍候。"]
 
 
 def _remote_project() -> Project:
@@ -713,6 +973,22 @@ def test_remote_task_runs_named_action_and_returns_output() -> None:
     assert result["output"] == "VPP-5QH2-34MZ-HRRU"
     assert [action.name for action in remote.calls] == ["生成激活码"]
     assert notices == ["正在为 VPP数字孪生项目执行“生成激活码”，请稍候。"]
+
+
+def test_remote_task_retry_on_the_same_message_notifies_once() -> None:
+    remote = FakeRemote(stdout="VPP-5QH2-34MZ-HRRU\n")
+    notices: list[str] = []
+    runtime = make_runtime(
+        projects=(_remote_project(),),
+        remote=remote,
+        notifier=lambda _identity, text: notices.append(text),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    runtime.remote_task("生成激活码")
+    runtime.remote_task("生成激活码")
+
+    assert len(notices) == 1
 
 
 def test_remote_task_rejects_an_unregistered_action_without_running() -> None:

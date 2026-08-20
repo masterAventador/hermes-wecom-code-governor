@@ -298,6 +298,55 @@ def test_job_rejects_unapproved_artifact_globs_before_execution(tmp_path: Path) 
         )
 
 
+@dataclass
+class NoArtifactExecutor:
+    result: JobExecutionResult = JobExecutionResult(0, "tests passed", "")
+
+    def run(self, request: JobExecutionRequest) -> JobExecutionResult:
+        return self.result
+
+
+def test_fallback_globs_tolerate_a_command_that_produces_no_artifacts(tmp_path: Path) -> None:
+    repo = create_repo(tmp_path)
+    runner = ProjectJobRunner(tmp_path / "runtime", executor=NoArtifactExecutor())
+
+    # 回退来的 glob（require_artifacts=False）：命令成功但没产出时空手返回，不报错。
+    lenient = runner.run(
+        project(repo),
+        job_id="0820-test-lenient",
+        argv=("./build-artifact",),
+        artifact_globs=("release/*.bin",),
+        require_artifacts=False,
+    )
+    assert lenient.status == "completed"
+    assert lenient.output == "tests passed"
+    assert lenient.artifacts == ()
+    assert lenient.staging_root is None
+
+    # 显式请求的 glob 仍严格要求产出。
+    with pytest.raises(FileNotFoundError, match="was not produced"):
+        runner.run(
+            project(repo),
+            job_id="0820-test-strict",
+            argv=("./build-artifact",),
+            artifact_globs=("release/*.bin",),
+        )
+
+
+def test_public_validate_rejects_bad_globs_and_names_the_allowlist(tmp_path: Path) -> None:
+    repo = create_repo(tmp_path)
+    runner = ProjectJobRunner(tmp_path / "runtime", executor=FakeExecutor())
+
+    # 报错必须列出允许的 glob，让外层模型一次改对而不是盲试。
+    with pytest.raises(PermissionError, match=r"release/\*\.bin"):
+        runner.validate(
+            project(repo),
+            job_id="0820-mac",
+            argv=("./build-artifact",),
+            artifact_globs=("dist/*.dmg",),
+        )
+
+
 def test_failed_job_cleans_worktree_and_does_not_stage_artifacts(tmp_path: Path) -> None:
     repo = create_repo(tmp_path)
     executor = FakeExecutor(JobExecutionResult(3, "", "build failed"))

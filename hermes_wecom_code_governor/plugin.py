@@ -262,7 +262,7 @@ def register_runtime_components(ctx: Any, runtime: GovernorRuntime | Any) -> Non
                     "items": {"type": "string"},
                     "minItems": 1,
                     "maxItems": 10,
-                    "description": "可选；需要自动交付的已允许产物 glob",
+                    "description": "可选；建议省略，省略时自动交付本次任务实际产出的已登记产物",
                 },
                 "title": {
                     "type": "string",
