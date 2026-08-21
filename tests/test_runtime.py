@@ -18,7 +18,10 @@ from hermes_wecom_code_governor.config import (
 )
 from hermes_wecom_code_governor.delivery import ArtifactDelivery
 from hermes_wecom_code_governor.discovery import discover_git_repositories
+from hermes_wecom_code_governor.http_action import HttpActionResult
 from hermes_wecom_code_governor.policy import (
+    HttpAction,
+    HttpActionParameter,
     Identity,
     PermissionGroup,
     Policy,
@@ -185,6 +188,7 @@ def make_runtime(
     notifier: object | None = None,
     projects: tuple[Project, ...] | None = None,
     remote: FakeRemote | None = None,
+    http: object | None = None,
 ) -> GovernorRuntime:
     configured_projects = projects or (
         Project("aijd-demo", "AIJD测试项目", Path("/Users/aventador/sourceCode/bjx/aijd-demo")),
@@ -223,6 +227,7 @@ def make_runtime(
         inspector=inspector,
         notifier=notifier,
         remote=remote,
+        http=http,
         now=lambda: (8, 17),
     )
 
@@ -511,6 +516,13 @@ def test_outer_hermes_file_and_terminal_tools_are_always_blocked() -> None:
         directive = runtime.pre_tool_call(tool_name, {"path": "README.md"})
         assert directive["action"] == "block"
         assert "code governor" in directive["message"]
+
+
+def test_governor_http_action_tool_passes_the_tool_gate() -> None:
+    runtime = make_runtime(projects=(_light_project(),))
+    runtime.select_project("vpp-digital-twin")
+
+    assert runtime.pre_tool_call("governor_http_action", {"action": "查看警示灯状态"}) is None
 
 
 def test_local_side_effect_tools_outside_governed_surface_are_blocked() -> None:
@@ -956,6 +968,159 @@ def test_push_remote_reports_failure_reason() -> None:
 
     assert result["status"] == "failed"
     assert "connection refused" in result["message"]
+
+
+def _light_project() -> Project:
+    return Project(
+        "vpp-digital-twin",
+        "VPP数字孪生项目",
+        Path("/Users/aventador/sourceCode/vpp-digital-twin"),
+        http_actions=(
+            HttpAction(
+                name="设置警示灯颜色",
+                method="POST",
+                url="http://gateway.test/v1/lights/{light}/command",
+                body_template='{{"action":"color","color":"{color}","mode":"solid"}}',
+                parameters=(
+                    HttpActionParameter(name="light", type="integer", minimum=1, maximum=9),
+                    HttpActionParameter(name="color", type="choice", choices=("red", "blue")),
+                ),
+            ),
+            HttpAction(name="查看警示灯状态", method="GET", url="http://gateway.test/v1/lights"),
+        ),
+    )
+
+
+@dataclass
+class FakeHttp:
+    result: HttpActionResult = HttpActionResult(status=200, body='{"ok":true}')
+
+    def __post_init__(self) -> None:
+        self.calls: list[tuple[HttpAction, dict]] = []
+
+    def run(self, action: HttpAction, params: dict) -> HttpActionResult:
+        self.calls.append((action, params))
+        return self.result
+
+
+def test_http_task_runs_named_action_with_validated_parameters() -> None:
+    http = FakeHttp()
+    notices: list[str] = []
+    runtime = make_runtime(
+        projects=(_light_project(),),
+        http=http,
+        notifier=lambda _identity, text: notices.append(text),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    result = runtime.http_task(
+        "设置警示灯颜色", params={"light": 3, "color": "blue"}, ack="这就把 3 号灯调成蓝色。"
+    )
+
+    assert result["action"] == "设置警示灯颜色"
+    assert result["status"] == "completed"
+    assert result["http_status"] == 200
+    assert result["body"] == '{"ok":true}'
+    action, params = http.calls[0]
+    assert action.name == "设置警示灯颜色"
+    assert params == {"light": 3, "color": "blue"}
+    assert notices == ["这就把 3 号灯调成蓝色。"]
+
+
+def test_http_task_rejects_an_unregistered_action_without_running() -> None:
+    http = FakeHttp()
+    runtime = make_runtime(projects=(_light_project(),), http=http)
+    runtime.select_project("vpp-digital-twin")
+
+    with pytest.raises(PermissionError, match="http action is not registered"):
+        runtime.http_task("重启服务器", params={})
+
+    assert http.calls == []
+
+
+def test_http_task_reports_transport_failure_as_failed_status() -> None:
+    http = FakeHttp(result=HttpActionResult(status=0, body="", error="connection refused"))
+    runtime = make_runtime(projects=(_light_project(),), http=http)
+    runtime.select_project("vpp-digital-twin")
+
+    result = runtime.http_task("查看警示灯状态")
+
+    assert result["status"] == "failed"
+    assert "connection refused" in result["error"]
+
+
+@pytest.mark.parametrize("status", [304, 409, 500])
+def test_http_task_reports_a_gateway_error_status_as_failed(status: int) -> None:
+    # 灯离线时网关回 409、故障时回 5xx，都不能被说成"已经设置好了"。
+    http = FakeHttp(result=HttpActionResult(status=status, body='{"error":"light-offline"}'))
+    runtime = make_runtime(projects=(_light_project(),), http=http)
+    runtime.select_project("vpp-digital-twin")
+
+    result = runtime.http_task("设置警示灯颜色", params={"light": 9, "color": "blue"})
+
+    assert result["status"] == "failed"
+    assert result["http_status"] == status
+    assert "light-offline" in result["body"]
+
+
+def test_http_task_retry_on_the_same_message_notifies_once() -> None:
+    http = FakeHttp()
+    notices: list[str] = []
+    runtime = make_runtime(
+        projects=(_light_project(),),
+        http=http,
+        notifier=lambda _identity, text: notices.append(text),
+    )
+    runtime.select_project("vpp-digital-twin")
+
+    runtime.http_task("查看警示灯状态")
+    runtime.http_task("查看警示灯状态")
+
+    assert len(notices) == 1
+
+
+def test_http_task_is_blocked_while_a_code_task_is_active() -> None:
+    http = FakeHttp()
+    codex = FakeCodex([CodexRunResult("write-thread", "请确认。", CodexTaskState.NEEDS_INPUT)], [])
+    runtime = make_runtime(projects=(_light_project(),), http=http, codex=codex)
+    runtime.select_project("vpp-digital-twin")
+    runtime.codex_change("改点东西", "改代码")
+
+    with pytest.raises(RuntimeError, match="finish the active code task"):
+        runtime.http_task("查看警示灯状态")
+
+    assert http.calls == []
+
+
+def test_http_task_writes_an_audit_line_with_identity_and_parameters(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime = make_runtime(projects=(_light_project(),), http=FakeHttp())
+    runtime.select_project("vpp-digital-twin")
+
+    with caplog.at_level("INFO", logger="hermes_wecom_code_governor.runtime"):
+        runtime.http_task("设置警示灯颜色", params={"light": 9, "color": "blue"})
+
+    audit = [record for record in caplog.records if "http action" in record.getMessage()]
+    assert audit
+    message = audit[0].getMessage()
+    assert "设置警示灯颜色" in message
+    assert "user-1" in message
+    assert "blue" in message
+
+
+def test_prompt_context_lists_http_actions_with_parameter_specs() -> None:
+    runtime = make_runtime(projects=(_light_project(),))
+    runtime.select_project("vpp-digital-twin")
+
+    context = runtime.pre_llm_call()["context"]
+
+    assert "当前项目可触发的受控 HTTP 动作" in context
+    assert "设置警示灯颜色" in context
+    assert "light: 1-9 的整数" in context
+    assert "color: red/blue" in context
+    assert "查看警示灯状态" in context
+    assert "governor_http_action" in context
 
 
 def test_remote_task_runs_named_action_and_returns_output() -> None:

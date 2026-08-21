@@ -503,29 +503,39 @@ def test_parses_http_actions_with_parameter_specs(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "actions_yaml",
+    ("actions_yaml", "message"),
     [
         # 非 http(s) 协议
-        """
+        (
+            """
       - name: 读文件
         method: GET
         url: "file:///etc/passwd"
 """,
+            "must start with http",
+        ),
         # 不支持的方法
-        """
+        (
+            """
       - name: 删灯
         method: DELETE
         url: "http://example.test/v1/lights/1"
 """,
+            "must be GET or POST",
+        ),
         # URL 占位符没有对应参数声明
-        """
+        (
+            """
       - name: 控灯
         method: POST
         url: "http://example.test/v1/lights/{light}/command"
         body_template: '{{"a":1}}'
 """,
+            "must exactly match",
+        ),
         # 重名动作
-        """
+        (
+            """
       - name: 查看警示灯状态
         method: GET
         url: "http://example.test/v1/lights"
@@ -533,8 +543,11 @@ def test_parses_http_actions_with_parameter_specs(tmp_path: Path) -> None:
         method: GET
         url: "http://example.test/v2/lights"
 """,
+            "duplicate action names",
+        ),
         # choice 值含模板注入风险字符
-        """
+        (
+            """
       - name: 控灯
         method: POST
         url: "http://example.test/v1/lights"
@@ -544,10 +557,97 @@ def test_parses_http_actions_with_parameter_specs(tmp_path: Path) -> None:
             type: choice
             choices: ['red"},{"evil":"1']
 """,
+            r"choices must be non-empty values matching",
+        ),
+        # choice 值含 # —— 渲染进 URL 会被当成 fragment 分隔符，把后面写死的参数整段截掉
+        (
+            """
+      - name: 控灯
+        method: GET
+        url: "http://example.test/v1/set?color={color}&mode=solid"
+        parameters:
+          - name: color
+            type: choice
+            choices: ['#FF0000']
+""",
+            r"choices must be non-empty values matching",
+        ),
+        # 孤立右大括号：近似解析看不出来，但 str.format 渲染时会炸
+        (
+            """
+      - name: 控灯
+        method: GET
+        url: "http://example.test/v1/lights}"
+""",
+            "is not a valid template",
+        ),
+        # 嵌套格式串：渲染时会去找未声明的参数
+        (
+            """
+      - name: 控灯
+        method: GET
+        url: "http://example.test/v1/{color:>{width}}"
+        parameters:
+          - name: color
+            type: choice
+            choices: [red]
+""",
+            "is not a valid template",
+        ),
+        # integer 参数缺少上下界声明
+        (
+            """
+      - name: 控灯
+        method: GET
+        url: "http://example.test/v1/lights/{light}"
+        parameters:
+          - name: light
+            type: integer
+            maximum: 9
+""",
+            "require minimum and maximum bounds",
+        ),
+        # integer 参数上下界颠倒
+        (
+            """
+      - name: 控灯
+        method: GET
+        url: "http://example.test/v1/lights/{light}"
+        parameters:
+          - name: light
+            type: integer
+            minimum: 9
+            maximum: 1
+""",
+            "require minimum <= maximum",
+        ),
     ],
 )
-def test_invalid_http_actions_fail_closed(tmp_path: Path, actions_yaml: str) -> None:
+def test_invalid_http_actions_fail_closed(tmp_path: Path, actions_yaml: str, message: str) -> None:
     config_path = _http_actions_config(tmp_path, actions_yaml.rstrip())
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=message):
         load_governor_config(config_path)
+
+
+def test_integer_parameters_accept_zero_and_negative_bounds(tmp_path: Path) -> None:
+    # 亮度 0-100、温差 -20-40 这类登记方式都合法，下界不是"必须为正整数"。
+    config_path = _http_actions_config(
+        tmp_path,
+        """
+      - name: 设置亮度
+        method: GET
+        url: "http://example.test/v1/brightness/{level}"
+        parameters:
+          - name: level
+            type: integer
+            minimum: 0
+            maximum: 100
+""".rstrip(),
+    )
+
+    config = load_governor_config(config_path)
+
+    assert config.policy.project("vpp").http_actions[0].parameters == (
+        HttpActionParameter(name="level", type="integer", minimum=0, maximum=100),
+    )

@@ -4,7 +4,12 @@ import pytest
 import yaml
 
 from hermes_wecom_code_governor.config import load_governor_config
-from hermes_wecom_code_governor.policy import Identity, RemoteAction
+from hermes_wecom_code_governor.policy import (
+    HttpAction,
+    HttpActionParameter,
+    Identity,
+    RemoteAction,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -66,6 +71,29 @@ def test_local_governor_config_contains_known_projects_and_no_secrets() -> None:
             host="vpp-license",
             argv=("/usr/local/bin/node", "/opt/vpp-license/issue-code.mjs"),
             timeout_seconds=30,
+        ),
+    )
+    assert vpp.http_actions == (
+        HttpAction(
+            name="设置警示灯颜色",
+            method="POST",
+            url="http://49.233.213.109:7100/v1/lights/{light}/command",
+            body_template='{{"action":"color","color":"{color}","mode":"solid"}}',
+            parameters=(
+                HttpActionParameter(name="light", type="integer", minimum=1, maximum=9),
+                HttpActionParameter(
+                    name="color",
+                    type="choice",
+                    choices=("red", "yellow", "green", "blue", "white", "purple", "cyan"),
+                ),
+            ),
+            timeout_seconds=10,
+        ),
+        HttpAction(
+            name="查看警示灯状态",
+            method="GET",
+            url="http://49.233.213.109:7100/v1/lights",
+            timeout_seconds=10,
         ),
     )
     assert vpp.push_on_merge is True
@@ -232,6 +260,7 @@ def test_plugin_manifest_declares_hooks_and_tools() -> None:
         "governor_codex_change",
         "governor_project_job",
         "governor_remote_task",
+        "governor_http_action",
         "governor_push",
         "governor_deliver_file",
     }

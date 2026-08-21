@@ -23,6 +23,7 @@ provides_tools:
   - governor_codex_change
   - governor_project_job
   - governor_remote_task
+  - governor_http_action
   - governor_push
   - governor_deliver_file
 python_dependencies:

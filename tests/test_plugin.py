@@ -83,6 +83,14 @@ class FakeRuntime:
     def remote_task(self, action: str, ack: str | None = None) -> dict:
         return {"action": action, "ack": ack}
 
+    def http_task(
+        self,
+        action: str,
+        params: dict | None = None,
+        ack: str | None = None,
+    ) -> dict:
+        return {"action": action, "params": params, "ack": ack}
+
     def deliver_file(self, path: str) -> dict:
         return {"channel": "wecom", "filename": path}
 
@@ -108,6 +116,7 @@ def test_registers_governance_hooks_and_model_tools() -> None:
         "governor_codex_change",
         "governor_project_job",
         "governor_remote_task",
+        "governor_http_action",
         "governor_push",
         "governor_deliver_file",
     }
@@ -174,9 +183,38 @@ def test_registers_governance_hooks_and_model_tools() -> None:
         "ack": "这就去生成一个新激活码。",
     }
     assert call_tool(
+        ctx.tools["governor_http_action"],
+        {
+            "action": "设置警示灯颜色",
+            "params": {"light": 9, "color": "blue"},
+            "ack": "这就把 9 号灯调成蓝色。",
+        },
+    ) == {
+        "action": "设置警示灯颜色",
+        "params": {"light": 9, "color": "blue"},
+        "ack": "这就把 9 号灯调成蓝色。",
+    }
+    assert call_tool(
         ctx.tools["governor_deliver_file"],
         {"path": "release/app.zip"},
     ) == {"channel": "wecom", "filename": "release/app.zip"}
+
+
+def test_http_action_params_default_to_empty_and_reject_non_object_values() -> None:
+    ctx = FakeContext()
+    register_runtime_components(ctx, FakeRuntime())
+
+    assert call_tool(ctx.tools["governor_http_action"], {"action": "查看警示灯状态"}) == {
+        "action": "查看警示灯状态",
+        "params": {},
+        "ack": None,
+    }
+    result = call_tool(
+        ctx.tools["governor_http_action"],
+        {"action": "设置警示灯颜色", "params": [["light", 9]]},
+    )
+
+    assert "params" in result["error"]
 
 
 def test_tool_handler_returns_a_model_visible_error_instead_of_raising() -> None:

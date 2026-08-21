@@ -63,6 +63,14 @@ class _RecordingHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         type(self).requests.append(("GET", self.path, ""))
+        if self.path.endswith("/offline"):
+            # 真实灯网关对没有 TCP 客户端连上的灯就是回 409 + 错误体。
+            payload = json.dumps({"error": "light-offline"}).encode()
+            self.send_response(409)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         payload = json.dumps({"lights": [{"id": 1, "online": True}]}).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
@@ -116,6 +124,15 @@ def test_runner_gets_status_without_parameters(http_server: str) -> None:
     assert result.status == 200
     assert "online" in result.body
     assert _RecordingHandler.requests[0][0] == "GET"
+
+
+def test_error_response_keeps_the_gateway_status_and_body(http_server: str) -> None:
+    action = HttpAction(name="查看警示灯状态", method="GET", url=f"{http_server}/v1/lights/offline")
+
+    result = HttpActionRunner().run(action, {})
+
+    assert result.status == 409
+    assert json.loads(result.body) == {"error": "light-offline"}
 
 
 def test_connection_failure_returns_error_instead_of_raising() -> None:

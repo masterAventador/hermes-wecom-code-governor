@@ -18,7 +18,8 @@ from .codex_runtime import (
 from .config import GovernorConfig, build_project_catalog
 from .delivery import ArtifactDelivery, FileDeliveryService
 from .execution import combine_output
-from .policy import Identity, Policy, Project
+from .http_action import HttpActionRunner
+from .policy import HttpAction, HttpActionParameter, Identity, Policy, Project
 from .project_inspector import ProjectInspector
 from .project_job import ProjectJobRunner
 from .state import DurableState, SessionRecord, SessionStateRepository
@@ -38,6 +39,7 @@ _GOVERNOR_TOOLS = frozenset(
         "governor_codex_change",
         "governor_project_job",
         "governor_remote_task",
+        "governor_http_action",
         "governor_push",
         "governor_deliver_file",
     }
@@ -89,6 +91,7 @@ class GovernorRuntime:
         jobs: ProjectJobRunner | Any | None = None,
         inspector: ProjectInspector | Any | None = None,
         remote: Any | None = None,
+        http: Any | None = None,
         notifier: Callable[[Identity, str], None] | None = None,
         now: Callable[[], tuple[int, int]] | None = None,
     ) -> None:
@@ -112,6 +115,7 @@ class GovernorRuntime:
 
             remote = SshRemoteRunner()
         self._remote = remote
+        self._http = http or HttpActionRunner()
         self._notifier = notifier
         self._pending_deliveries: dict[str, deque[ArtifactDelivery]] = defaultdict(deque)
         # 工具被拒或超时后外层会带同一条消息重试；按 (通知类别, 会话) 记录已提示
@@ -192,6 +196,7 @@ class GovernorRuntime:
             )
         selected_job_lines: list[str] = []
         selected_remote_lines: list[str] = []
+        selected_http_lines: list[str] = []
         if record.project_id:
             selected_project = self._projects[record.project_id]
             selected_job_lines = [
@@ -204,6 +209,13 @@ class GovernorRuntime:
             ]
             if selected_remote_lines:
                 selected_remote_lines.insert(0, "当前项目可触发的远程受控动作（按名称触发）：")
+            selected_http_lines = [
+                self._http_action_line(action) for action in selected_project.http_actions
+            ]
+            if selected_http_lines:
+                selected_http_lines.insert(
+                    0, "当前项目可触发的受控 HTTP 动作（按名称触发，参数只能取下列取值）："
+                )
 
         context = "\n".join(
             (
@@ -235,6 +247,7 @@ class GovernorRuntime:
                 current,
                 *selected_job_lines,
                 *selected_remote_lines,
+                *selected_http_lines,
                 "",
                 "用户明确提到另一个授权项目时，可以调用 governor_select_project 切换，不要被旧"
                 "项目记忆绑死。项目只读查询由你直接使用 governor_project_files、"
@@ -258,6 +271,9 @@ class GovernorRuntime:
                 "当前项目登记了远程受控动作时（见上方清单），用户明确要求执行其中某个动作，"
                 "就用 governor_remote_task 并传入清单里的动作名称；动作的目标主机与命令都是"
                 "预先固定的，你只能按名称触发，不能自行构造命令或主机，也不要触发用户未要求的动作。",
+                "用户要求控制警示灯、查看灯或设备连接状态等已登记的 HTTP 动作时（见上方清单），"
+                "使用 governor_http_action，只能传清单里列出的动作名称与参数取值；请求地址和请求体"
+                "都由配置固定，你不能自行拼接 URL，也不要触发用户未要求的动作。",
                 "调用 governor_codex_change、governor_project_job、governor_remote_task 这类耗时"
                 "工具时，请通过 ack 参数先给用户一句回复，告诉他你接下来要做什么；内容和语气由你"
                 "自己组织，回应用户这次说的话就好，别每次都用同一个句式。",
@@ -776,6 +792,65 @@ class GovernorRuntime:
             "status": "completed" if succeeded else "failed",
             "exit_code": result.exit_code,
             "output": output,
+        }
+
+    @staticmethod
+    def _http_parameter_summary(parameter: HttpActionParameter) -> str:
+        if parameter.type == "integer":
+            return f"{parameter.name}: {parameter.minimum}-{parameter.maximum} 的整数"
+        return f"{parameter.name}: {'/'.join(parameter.choices)}"
+
+    @staticmethod
+    def _http_action_line(action: HttpAction) -> str:
+        if not action.parameters:
+            return f"- {action.name}（无参数）"
+        summaries = "；".join(
+            GovernorRuntime._http_parameter_summary(parameter) for parameter in action.parameters
+        )
+        return f"- {action.name}（参数：{summaries}）"
+
+    def http_task(
+        self,
+        action_name: str,
+        params: dict[str, Any] | None = None,
+        ack: str | None = None,
+    ) -> dict[str, Any]:
+        env, project = self._selected_project(action="running an http action", require_idle=True)
+        name = action_name.strip()
+        action = next((item for item in project.http_actions if item.name == name), None)
+        if action is None:
+            raise PermissionError("http action is not registered for this project")
+        arguments = dict(params or {})
+        # 对外发起的受控请求必须可追溯：记录谁、在哪个会话、带什么参数触发了哪个动作。
+        logger.info(
+            "governed http action requested: action=%s params=%s project=%s user=%s chat=%s",
+            action.name,
+            arguments,
+            project.project_id,
+            env.identity.user_id,
+            env.identity.chat_id,
+        )
+        self._notify_once(
+            env,
+            "http",
+            self._ack_or(ack, f"正在为 {project.display_name}执行“{action.name}”，请稍候。"),
+        )
+        result = self._http.run(action, arguments)
+        # status 为 0 表示连不上目标；4xx/5xx 也不能报成功，否则模型会告诉用户已生效
+        # （灯没插电时网关就回 409）。urllib 已跟随过重定向，剩下的 3xx 同样不算成功。
+        succeeded = 200 <= result.status < 300
+        logger.info(
+            "governed http action finished: action=%s user=%s http_status=%s",
+            action.name,
+            env.identity.user_id,
+            result.status,
+        )
+        return {
+            "action": action.name,
+            "status": "completed" if succeeded else "failed",
+            "http_status": result.status,
+            "body": result.body,
+            "error": result.error,
         }
 
     def _selected_project_for_job(self) -> Project:

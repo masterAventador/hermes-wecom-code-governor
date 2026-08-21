@@ -43,6 +43,26 @@ projects:
         host: vpp-license
         argv: [/usr/local/bin/node, /opt/vpp-license/issue-code.mjs]
         timeout_seconds: 30
+    http_actions:
+      # 现场警示灯网关：1-8 是现场灯，9 是桌面测试灯。网关接口暂无鉴权，
+      # 用户知情并接受（内网赶进度），正式交付前再补 token。
+      - name: 设置警示灯颜色
+        method: POST
+        url: "http://49.233.213.109:7100/v1/lights/{light}/command"
+        body_template: '{{"action":"color","color":"{color}","mode":"solid"}}'
+        timeout_seconds: 10
+        parameters:
+          - name: light
+            type: integer
+            minimum: 1
+            maximum: 9
+          - name: color
+            type: choice
+            choices: [red, yellow, green, blue, white, purple, cyan]
+      - name: 查看警示灯状态
+        method: GET
+        url: "http://49.233.213.109:7100/v1/lights"
+        timeout_seconds: 10
     seed_paths:
       - node_modules
     readable_paths:

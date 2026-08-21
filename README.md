@@ -16,7 +16,8 @@
 Hermes 外层使用默认 agent loop 完成对话和项目分析，但不能调用原生文件或终端工具绕过治理。
 项目读取走 `governor_project_files`、`governor_project_read`、`governor_project_search` 和
 `governor_project_git`；测试、打包、导出等非源码修改动作走 `governor_project_job`；预先登记
-的远程受控动作（如在授权服务器上生成激活码）走 `governor_remote_task`；只有代码修改走
+的远程受控动作（如在授权服务器上生成激活码）走 `governor_remote_task`；预先登记的受控 HTTP
+动作（如控制现场警示灯、查询设备连接状态）走 `governor_http_action`；只有代码修改走
 `governor_codex_change`，启动或恢复本地 Codex 原生线程。
 
 ## 安全边界
@@ -36,11 +37,16 @@ Hermes 外层使用默认 agent loop 完成对话和项目分析，但不能调�
   返回 `needs_input`，保留 worktree 和同一个 Codex thread 等待下一条消息。
 - 打包、测试和导出只有用户明确要求时才能执行，并且命令必须由管理员预先登记；任务在一次性
   隔离 worktree 中运行，不能修改原仓库、读取个人文件、继承机器人密钥或访问公网。
-- `governor_remote_task` 是唯一不经沙箱、直接出网并使用本机 SSH 私钥的动作，因此收敛得最严：
+- `governor_remote_task` 是唯一使用本机 SSH 私钥的动作，和 `governor_http_action` 一起构成仅有
+  的两条不经沙箱直接出网的路径，因此收敛得最严：
   只能触发管理员在 `remote_actions` 里登记的动作，目标主机与命令 argv 完全固定，模型只传
   动作名称、无法拼接命令或主机；执行用 `BatchMode=yes` + `StrictHostKeyChecking=yes`、
   清空环境仅留 PATH（机器人密钥不进子进程）、命令级超时；主机建议用 `~/.ssh/config` 别名，
   真实地址与账户不入库。每次触发前后写入含触发者 userid/chatid 的审计日志。
+- `governor_http_action` 同样直接出网，收敛方式与远程动作一致：方法、URL 与请求体模板全部
+  来自 `http_actions` 配置，模型只能按登记名称触发并填写声明过的参数；参数按类型逐个校验
+  （整数带上下界、枚举只认登记取值且限制在无注入面的字符集），多余或越界参数直接拒绝，
+  请求不经系统代理直连并受动作级超时约束。每次触发前后写入含触发者身份与参数的审计日志。
 - 部署和推送没有隐式入口，未配置受控命令或远程动作时不能执行。
 - 既有文件或任务产物不超过 50MiB 时由企微原生发送，超过后上传腾讯云并回复七天临时链接。
 

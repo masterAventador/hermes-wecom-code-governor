@@ -89,7 +89,16 @@ def _optional_text_list(args: dict, key: str) -> list[str]:
     return _text_list(args, key)
 
 
-# 三个耗时工具共用的开工回复参数说明（值复用：改文案只改这一处）。
+def _optional_object(args: dict, key: str) -> dict:
+    value = args.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be an object")
+    return value
+
+
+# 耗时工具共用的开工回复参数说明（值复用：改文案只改这一处）。
 _ACK_DESCRIPTION = (
     "开工时立即回复给用户的一句话，用你自己的口吻结合用户这次的原话来写；省略则发系统默认提示"
 )
@@ -327,6 +336,33 @@ def register_runtime_components(ctx: Any, runtime: GovernorRuntime | Any) -> Non
             ["action"],
             lambda args: runtime.remote_task(
                 _required_text(args, "action"),
+                ack=_optional_text(args, "ack"),
+            ),
+        ),
+        (
+            "governor_http_action",
+            "触发当前项目预先登记的受控 HTTP 动作（如控制警示灯、查询设备连接状态）；"
+            "只能按上下文清单里的登记名称触发，请求地址与请求体均由配置固定，"
+            "参数取值超出清单会被拒绝。",
+            {
+                "action": {
+                    "type": "string",
+                    "description": "当前项目 http_actions 中登记的动作名称",
+                },
+                "params": {
+                    "type": "object",
+                    "description": "动作声明的参数键值对，取值必须在上下文清单给出的范围内；"
+                    "无参数动作省略",
+                },
+                "ack": {
+                    "type": "string",
+                    "description": _ACK_DESCRIPTION,
+                },
+            },
+            ["action"],
+            lambda args: runtime.http_task(
+                _required_text(args, "action"),
+                params=_optional_object(args, "params"),
                 ack=_optional_text(args, "ack"),
             ),
         ),

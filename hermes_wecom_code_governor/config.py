@@ -4,6 +4,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from string import Formatter
 from typing import Any
 
 import yaml
@@ -124,6 +125,12 @@ def _positive_int(data: Mapping[str, Any], key: str, default: int) -> int:
     value = data.get(key, default)
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"safety.{key} must be a positive integer")
+    return value
+
+
+def _int_field(value: Any, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer")
     return value
 
 
@@ -257,9 +264,10 @@ def _remote_actions(value: Any, field_name: str) -> tuple[RemoteAction, ...]:
 
 
 _HTTP_PARAM_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
-# choice 值出现在 URL/JSON 模板里，只放行确定无注入面的字符。
-_HTTP_CHOICE_VALUE = re.compile(r"^[A-Za-z0-9_#.-]+$")
-_HTTP_PLACEHOLDER = re.compile(r"\{([^{}]*)\}")
+# choice 值原样渲染进 URL/JSON 模板，只放行在两处都无特殊含义的字符。
+# 尤其不含 #：它在 URL 里是 fragment 分隔符，urllib 会把它之后的内容（可能
+# 包括管理员写死的后续查询参数）在发请求前整段丢掉，且服务端多半仍回 200。
+_HTTP_CHOICE_VALUE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def _http_action_parameters(value: Any, field_name: str) -> tuple[HttpActionParameter, ...]:
@@ -274,10 +282,13 @@ def _http_action_parameters(value: Any, field_name: str) -> tuple[HttpActionPara
             raise ValueError(f"{prefix}.name must match [a-z][a-z0-9_]*: {name}")
         kind = _required_string(data, "type", f"{prefix}.type")
         if kind == "integer":
-            minimum = _positive_int_field(data.get("minimum", 0) or 0, f"{prefix}.minimum")
-            maximum = _positive_int_field(data.get("maximum", 0) or 0, f"{prefix}.maximum")
-            if "minimum" not in data or "maximum" not in data or minimum > maximum:
-                raise ValueError(f"{prefix} integer parameters require minimum <= maximum bounds")
+            if "minimum" not in data or "maximum" not in data:
+                raise ValueError(f"{prefix} integer parameters require minimum and maximum bounds")
+            # 下界可以是 0 或负数（亮度 0-100、温度 -20-40），取值范围由 minimum <= maximum 表达。
+            minimum = _int_field(data["minimum"], f"{prefix}.minimum")
+            maximum = _int_field(data["maximum"], f"{prefix}.maximum")
+            if minimum > maximum:
+                raise ValueError(f"{prefix} integer parameters require minimum <= maximum")
             parameters.append(
                 HttpActionParameter(name=name, type="integer", minimum=minimum, maximum=maximum)
             )
@@ -288,7 +299,7 @@ def _http_action_parameters(value: Any, field_name: str) -> tuple[HttpActionPara
                 for choice in choices
             ):
                 raise ValueError(
-                    f"{prefix}.choices must be non-empty values matching [A-Za-z0-9_#.-]+"
+                    f"{prefix}.choices must be non-empty values matching [A-Za-z0-9_.-]+"
                 )
             parameters.append(HttpActionParameter(name=name, type="choice", choices=tuple(choices)))
         else:
@@ -300,12 +311,25 @@ def _http_action_parameters(value: Any, field_name: str) -> tuple[HttpActionPara
 
 
 def _template_placeholders(template: str, field_name: str) -> set[str]:
-    stripped = template.replace("{{", "").replace("}}", "")
+    """用 str.format 自己的解析器提取占位符：近似正则会漏掉孤立大括号和嵌套格式串，
+    让本该在加载期拒绝的模板拖到用户触发动作时才在渲染中炸开。"""
+    try:
+        parsed = list(Formatter().parse(template))
+    except ValueError as error:
+        raise ValueError(f"{field_name} is not a valid template: {error}") from error
     names = set()
-    for match in _HTTP_PLACEHOLDER.finditer(stripped):
-        name = match.group(1)
+    for _literal, name, format_spec, conversion in parsed:
+        if name is None:
+            continue
         if not _HTTP_PARAM_NAME.fullmatch(name):
             raise ValueError(f"{field_name} contains an invalid placeholder: {{{name}}}")
+        # 参数值一律以字符串填入，格式规格与转换标记既无用途又能引用未声明的参数
+        # （如 {color:>{width}}），一律拒绝。
+        if format_spec or conversion:
+            raise ValueError(
+                f"{field_name} is not a valid template: "
+                f"placeholder {{{name}}} must not use a format spec or conversion"
+            )
         names.add(name)
     return names
 

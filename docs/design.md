@@ -30,11 +30,21 @@ App Server permission profile 和企微项目卡片。Codex App Server 只负责
 permission profile。模型不能自行扩大项目范围，也不能把任意命令声明成“打包”或“部署”来
 绕过配置。任务命令和允许交付的产物规则只能来自管理员维护的项目配置。
 
-远程受控动作（`governor_remote_task`）是唯一跨出本机沙箱、直接出网并使用本机 SSH 私钥的
-路径，因此单独收敛：目标主机与命令 argv 完全来自项目配置的 `remote_actions`，模型只能按
+远程受控动作（`governor_remote_task`）是唯一使用本机 SSH 私钥的路径，和下面的受控 HTTP 动作
+一起构成仅有的两条跨出本机沙箱、直接出网的路径，因此单独收敛：目标主机与命令 argv 完全来自项目配置的 `remote_actions`，模型只能按
 登记名称触发、无法拼接主机或命令。执行强制 `BatchMode=yes` + `StrictHostKeyChecking=yes`，
 清空子进程环境仅保留 PATH（机器人密钥不外传），并受命令级超时约束。触发受同一套授权约束
 （授权身份 + 已选项目 + 无活动改码任务），每次执行前后写入含触发者身份的审计日志。
+
+受控 HTTP 动作（`governor_http_action`）用同一套思路管住直接出网的 HTTP 调用：方法、URL 与
+请求体模板来自项目配置的 `http_actions`，模型只能按登记名称触发并提供声明过的参数。参数在
+配置加载时就限定了类型与取值范围（整数带上下界、枚举只认登记取值且限制为无注入面的字符
+集），运行时逐个校验后才填入模板占位符，多余参数、缺失参数、越界或非枚举取值一律拒绝。
+模板本身在加载期用 `str.format` 同源的解析器校验：占位符集合必须与参数声明双向一致，格式
+规格与转换标记一律禁用（它们能引用未声明的参数），语法非法的模板开机即拒绝而不是等到用户
+触发时才炸；
+请求忽略系统代理直连目标，受动作级超时约束，响应体截断后返回。触发受同一套授权约束，
+每次执行前后写入含触发者身份与参数的审计日志。
 
 ## 文件交付
 
@@ -57,11 +67,13 @@ permission profile。模型不能自行扩大项目范围，也不能把任意�
    运行精确匹配的管理员命令，完成后暂存允许的产物并删除 worktree；不启动内层 Agent。
 4. 需要触发远程受控动作：`governor_remote_task` 按登记名称 ssh 到固定主机执行固定命令，
    取回截断后的输出；不创建 worktree、不启动内层 Agent，活动改码任务存在时拒绝执行。
-5. 需要修改：`governor_codex_change` 创建 worktree，以写权限组启动或恢复任务线程。
-6. Codex 返回 `needs_input`：保留 worktree 和 thread，等待用户后续消息。
-7. Codex 返回 `completed`：脚本检查变更范围、运行验证、提交并快进合并到基准分支。
-8. 验证成功：清理 worktree 和任务分支。
-9. 验证或合并失败：保留 worktree 和 thread，禁止宣称已经合并。
+5. 需要触发受控 HTTP 动作：`governor_http_action` 按登记名称校验参数后向固定地址发起请求，
+   返回状态码与截断后的响应体；不创建 worktree、不启动内层 Agent，活动改码任务存在时拒绝执行。
+6. 需要修改：`governor_codex_change` 创建 worktree，以写权限组启动或恢复任务线程。
+7. Codex 返回 `needs_input`：保留 worktree 和 thread，等待用户后续消息。
+8. Codex 返回 `completed`：脚本检查变更范围、运行验证、提交并快进合并到基准分支。
+9. 验证成功：清理 worktree 和任务分支。
+10. 验证或合并失败：保留 worktree 和 thread，禁止宣称已经合并。
 
 ## Codex 原生执行路线
 
