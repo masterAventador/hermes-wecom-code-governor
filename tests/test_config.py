@@ -3,7 +3,12 @@ from pathlib import Path
 import pytest
 
 from hermes_wecom_code_governor.config import load_governor_config
-from hermes_wecom_code_governor.policy import Identity, RemoteAction
+from hermes_wecom_code_governor.policy import (
+    HttpAction,
+    HttpActionParameter,
+    Identity,
+    RemoteAction,
+)
 
 
 def test_loads_projects_permissions_commands_and_safety_settings(tmp_path: Path) -> None:
@@ -421,4 +426,128 @@ def test_invalid_or_ambiguous_configuration_fails_closed(
     config_path.write_text(body.strip(), encoding="utf-8")
 
     with pytest.raises(ValueError, match=message):
+        load_governor_config(config_path)
+
+
+def _http_actions_config(tmp_path: Path, actions_yaml: str) -> Path:
+    config_path = tmp_path / "governor.yaml"
+    config_path.write_text(
+        f"""
+version: 1
+runtime_root: /runtime/hermes-governor
+projects:
+  - id: vpp
+    name: VPP数字孪生项目
+    path: /workspace/sourceCode/vpp-digital-twin
+    http_actions:
+{actions_yaml}
+permissions:
+  - name: owner
+    users: [owner]
+    chats: ['*']
+    projects: [vpp]
+""".strip(),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_parses_http_actions_with_parameter_specs(tmp_path: Path) -> None:
+    config_path = _http_actions_config(
+        tmp_path,
+        """
+      - name: 设置警示灯颜色
+        method: POST
+        url: "http://49.233.213.109:7100/v1/lights/{light}/command"
+        body_template: '{{"action":"color","color":"{color}","mode":"solid"}}'
+        timeout_seconds: 10
+        parameters:
+          - name: light
+            type: integer
+            minimum: 1
+            maximum: 9
+          - name: color
+            type: choice
+            choices: [red, yellow, green, blue, white, purple, cyan]
+      - name: 查看警示灯状态
+        method: GET
+        url: "http://49.233.213.109:7100/v1/lights"
+""".rstrip(),
+    )
+
+    config = load_governor_config(config_path)
+    vpp = config.policy.project("vpp")
+
+    assert vpp.http_actions == (
+        HttpAction(
+            name="设置警示灯颜色",
+            method="POST",
+            url="http://49.233.213.109:7100/v1/lights/{light}/command",
+            body_template='{{"action":"color","color":"{color}","mode":"solid"}}',
+            timeout_seconds=10,
+            parameters=(
+                HttpActionParameter(name="light", type="integer", minimum=1, maximum=9),
+                HttpActionParameter(
+                    name="color",
+                    type="choice",
+                    choices=("red", "yellow", "green", "blue", "white", "purple", "cyan"),
+                ),
+            ),
+        ),
+        HttpAction(
+            name="查看警示灯状态",
+            method="GET",
+            url="http://49.233.213.109:7100/v1/lights",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "actions_yaml",
+    [
+        # 非 http(s) 协议
+        """
+      - name: 读文件
+        method: GET
+        url: "file:///etc/passwd"
+""",
+        # 不支持的方法
+        """
+      - name: 删灯
+        method: DELETE
+        url: "http://example.test/v1/lights/1"
+""",
+        # URL 占位符没有对应参数声明
+        """
+      - name: 控灯
+        method: POST
+        url: "http://example.test/v1/lights/{light}/command"
+        body_template: '{{"a":1}}'
+""",
+        # 重名动作
+        """
+      - name: 查看警示灯状态
+        method: GET
+        url: "http://example.test/v1/lights"
+      - name: 查看警示灯状态
+        method: GET
+        url: "http://example.test/v2/lights"
+""",
+        # choice 值含模板注入风险字符
+        """
+      - name: 控灯
+        method: POST
+        url: "http://example.test/v1/lights"
+        body_template: '{{"color":"{color}"}}'
+        parameters:
+          - name: color
+            type: choice
+            choices: ['red"},{"evil":"1']
+""",
+    ],
+)
+def test_invalid_http_actions_fail_closed(tmp_path: Path, actions_yaml: str) -> None:
+    config_path = _http_actions_config(tmp_path, actions_yaml.rstrip())
+
+    with pytest.raises(ValueError):
         load_governor_config(config_path)

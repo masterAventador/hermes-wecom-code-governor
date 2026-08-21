@@ -22,6 +22,30 @@ class RemoteAction:
 
 
 @dataclass(frozen=True)
+class HttpActionParameter:
+    """受控 HTTP 动作的参数规格：integer 带上下界，choice 只认枚举值。"""
+
+    name: str
+    type: str
+    minimum: int | None = None
+    maximum: int | None = None
+    choices: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class HttpAction:
+    """预登记的受控 HTTP 动作：URL/请求体是配置里的固定模板，模型只能按名称
+    触发并提供白名单参数，参数校验通过后填入模板占位符。"""
+
+    name: str
+    method: str
+    url: str
+    body_template: str | None = None
+    parameters: tuple[HttpActionParameter, ...] = ()
+    timeout_seconds: int = 15
+
+
+@dataclass(frozen=True)
 class Project:
     project_id: str
     display_name: str
@@ -47,6 +71,7 @@ class Project:
     job_trusted_home_seeds: tuple[tuple[Path, Path], ...] = ()
     job_unix_sockets: tuple[Path, ...] = ()
     remote_actions: tuple[RemoteAction, ...] = ()
+    http_actions: tuple[HttpAction, ...] = ()
     push_on_merge: bool = False
     auto_discovered: bool = False
 

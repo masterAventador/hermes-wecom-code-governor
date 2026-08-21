@@ -11,7 +11,14 @@ import yaml
 from .codex_runtime import CodexRuntimeSettings
 from .delivery import WECOM_FILE_MAX_BYTES, CosDeliveryConfig, DeliveryConfig
 from .discovery import discover_git_repositories
-from .policy import PermissionGroup, Policy, Project, RemoteAction
+from .policy import (
+    HttpAction,
+    HttpActionParameter,
+    PermissionGroup,
+    Policy,
+    Project,
+    RemoteAction,
+)
 
 
 @dataclass(frozen=True)
@@ -249,6 +256,108 @@ def _remote_actions(value: Any, field_name: str) -> tuple[RemoteAction, ...]:
     return tuple(actions)
 
 
+_HTTP_PARAM_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+# choice 值出现在 URL/JSON 模板里，只放行确定无注入面的字符。
+_HTTP_CHOICE_VALUE = re.compile(r"^[A-Za-z0-9_#.-]+$")
+_HTTP_PLACEHOLDER = re.compile(r"\{([^{}]*)\}")
+
+
+def _http_action_parameters(value: Any, field_name: str) -> tuple[HttpActionParameter, ...]:
+    if value is None:
+        return ()
+    parameters: list[HttpActionParameter] = []
+    for index, raw in enumerate(_list(value, field_name)):
+        prefix = f"{field_name}[{index}]"
+        data = _mapping(raw, prefix)
+        name = _required_string(data, "name", f"{prefix}.name")
+        if not _HTTP_PARAM_NAME.fullmatch(name):
+            raise ValueError(f"{prefix}.name must match [a-z][a-z0-9_]*: {name}")
+        kind = _required_string(data, "type", f"{prefix}.type")
+        if kind == "integer":
+            minimum = _positive_int_field(data.get("minimum", 0) or 0, f"{prefix}.minimum")
+            maximum = _positive_int_field(data.get("maximum", 0) or 0, f"{prefix}.maximum")
+            if "minimum" not in data or "maximum" not in data or minimum > maximum:
+                raise ValueError(f"{prefix} integer parameters require minimum <= maximum bounds")
+            parameters.append(
+                HttpActionParameter(name=name, type="integer", minimum=minimum, maximum=maximum)
+            )
+        elif kind == "choice":
+            choices = _list(data.get("choices"), f"{prefix}.choices")
+            if not choices or not all(
+                isinstance(choice, str) and _HTTP_CHOICE_VALUE.fullmatch(choice)
+                for choice in choices
+            ):
+                raise ValueError(
+                    f"{prefix}.choices must be non-empty values matching [A-Za-z0-9_#.-]+"
+                )
+            parameters.append(HttpActionParameter(name=name, type="choice", choices=tuple(choices)))
+        else:
+            raise ValueError(f"{prefix}.type must be integer or choice: {kind}")
+    names = [parameter.name for parameter in parameters]
+    if len(set(names)) != len(names):
+        raise ValueError(f"{field_name} contains duplicate parameter names")
+    return tuple(parameters)
+
+
+def _template_placeholders(template: str, field_name: str) -> set[str]:
+    stripped = template.replace("{{", "").replace("}}", "")
+    names = set()
+    for match in _HTTP_PLACEHOLDER.finditer(stripped):
+        name = match.group(1)
+        if not _HTTP_PARAM_NAME.fullmatch(name):
+            raise ValueError(f"{field_name} contains an invalid placeholder: {{{name}}}")
+        names.add(name)
+    return names
+
+
+def _http_actions(value: Any, field_name: str) -> tuple[HttpAction, ...]:
+    if value is None:
+        return ()
+    actions: list[HttpAction] = []
+    for index, raw_action in enumerate(_list(value, field_name)):
+        prefix = f"{field_name}[{index}]"
+        data = _mapping(raw_action, prefix)
+        method = _required_string(data, "method", f"{prefix}.method").upper()
+        if method not in {"GET", "POST"}:
+            raise ValueError(f"{prefix}.method must be GET or POST")
+        url = _required_string(data, "url", f"{prefix}.url")
+        if not url.startswith(("http://", "https://")):
+            raise ValueError(f"{prefix}.url must start with http:// or https://")
+        body_template = data.get("body_template")
+        if body_template is not None and (
+            not isinstance(body_template, str) or not body_template.strip()
+        ):
+            raise ValueError(f"{prefix}.body_template must be a non-empty string")
+        if body_template is not None and method != "POST":
+            raise ValueError(f"{prefix}.body_template is only allowed for POST actions")
+        parameters = _http_action_parameters(data.get("parameters"), f"{prefix}.parameters")
+        placeholders = _template_placeholders(url, f"{prefix}.url")
+        if body_template is not None:
+            placeholders |= _template_placeholders(body_template, f"{prefix}.body_template")
+        declared = {parameter.name for parameter in parameters}
+        if placeholders != declared:
+            raise ValueError(
+                f"{prefix} placeholders {sorted(placeholders)} must exactly match "
+                f"declared parameters {sorted(declared)}"
+            )
+        actions.append(
+            HttpAction(
+                name=_required_string(data, "name", f"{prefix}.name"),
+                method=method,
+                url=url,
+                body_template=body_template,
+                parameters=parameters,
+                timeout_seconds=_positive_int_field(
+                    data.get("timeout_seconds", 15), f"{prefix}.timeout_seconds"
+                ),
+            )
+        )
+    names = [action.name for action in actions]
+    if len(set(names)) != len(names):
+        raise ValueError(f"{field_name} contains duplicate action names")
+    return tuple(actions)
+
+
 def _parse_project(raw: Any, index: int) -> Project:
     data = _mapping(raw, f"projects[{index}]")
     prefix = f"projects[{index}]"
@@ -301,6 +410,7 @@ def _parse_project(raw: Any, index: int) -> Project:
             job_data.get("trusted_home_seeds"), f"{prefix}.job.trusted_home_seeds"
         ),
         remote_actions=_remote_actions(data.get("remote_actions"), f"{prefix}.remote_actions"),
+        http_actions=_http_actions(data.get("http_actions"), f"{prefix}.http_actions"),
         push_on_merge=_boolean_field(data.get("push_on_merge", False), f"{prefix}.push_on_merge"),
         job_unix_sockets=tuple(
             _absolute_path(value, f"{prefix}.job.unix_sockets[{socket_index}]")
