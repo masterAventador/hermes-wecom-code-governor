@@ -44,8 +44,10 @@ projects:
         argv: [/usr/local/bin/node, /opt/vpp-license/issue-code.mjs]
         timeout_seconds: 30
     http_actions:
-      # 现场警示灯网关：1-8 是现场灯，9 是桌面测试灯。网关接口暂无鉴权，
+      # 现场警示灯（YNL308）网关：1-8 是现场灯，9 是桌面测试灯。网关接口暂无鉴权，
       # 用户知情并接受（内网赶进度），正式交付前再补 token。
+      # 灯支持四类显示模式：常亮/闪烁/熄灭、自定义 RGB、流水灯、蜂鸣器。蜂鸣器不登记
+      # （机器人不该让现场响铃）；网关的 raw 帧透传也不登记，它能拼出任意指令，等于绕过白名单。
       - name: 设置警示灯颜色
         method: POST
         url: "http://49.233.213.109:7100/v1/lights/{light}/command"
@@ -56,9 +58,91 @@ projects:
             type: integer
             minimum: 1
             maximum: 9
+            description: 灯号：1-8 是现场警示灯，9 是桌面测试灯
           - name: color
             type: choice
             choices: [red, yellow, green, blue, white, purple, cyan]
+            description: 灯的颜色
+      - name: 设置警示灯闪烁
+        method: POST
+        url: "http://49.233.213.109:7100/v1/lights/{light}/command"
+        body_template: '{{"action":"color","color":"{color}","mode":"blink","blinkHz":{hz}}}'
+        timeout_seconds: 10
+        parameters:
+          - name: light
+            type: integer
+            minimum: 1
+            maximum: 9
+            description: 灯号：1-8 是现场警示灯，9 是桌面测试灯
+          - name: color
+            type: choice
+            choices: [red, yellow, green, blue, white, purple, cyan]
+            description: 灯的颜色
+          - name: hz
+            type: choice
+            choices: ['16', '8', '4', '2', '1', '0.5', '0.25']
+            description: 每秒闪烁次数，数值越大越快；快闪用 8，慢闪用 1，特别慢用 0.25
+      - name: 熄灭警示灯
+        method: POST
+        url: "http://49.233.213.109:7100/v1/lights/{light}/command"
+        body_template: '{{"action":"off"}}'
+        timeout_seconds: 10
+        parameters:
+          - name: light
+            type: integer
+            minimum: 1
+            maximum: 9
+            description: 灯号：1-8 是现场警示灯，9 是桌面测试灯
+      - name: 设置警示灯流水效果
+        method: POST
+        url: "http://49.233.213.109:7100/v1/lights/{light}/command"
+        body_template: '{{"action":"flow","color":"{color}","mode":"{effect}","speed":{speed}}}'
+        timeout_seconds: 10
+        parameters:
+          - name: light
+            type: integer
+            minimum: 1
+            maximum: 9
+            description: 灯号：1-8 是现场警示灯，9 是桌面测试灯
+          - name: color
+            type: choice
+            choices: [red, yellow, green, blue, white, purple, cyan]
+            description: 灯的颜色
+          - name: effect
+            type: choice
+            choices: [cycle, bounce, grow1, grow2]
+            description: 流水样式：cycle 单灯循环、bounce 单灯往复、grow1/grow2 渐次点亮
+          - name: speed
+            type: integer
+            minimum: 0
+            maximum: 255
+            description: 流水速度：0 最快，255 最慢，一般用 100
+      - name: 自定义警示灯颜色
+        method: POST
+        url: "http://49.233.213.109:7100/v1/lights/{light}/command"
+        body_template: '{{"action":"rgb","r":{r},"g":{g},"b":{b}}}'
+        timeout_seconds: 10
+        parameters:
+          - name: light
+            type: integer
+            minimum: 1
+            maximum: 9
+            description: 灯号：1-8 是现场警示灯，9 是桌面测试灯
+          - name: r
+            type: integer
+            minimum: 0
+            maximum: 255
+            description: 红色分量 0-255
+          - name: g
+            type: integer
+            minimum: 0
+            maximum: 255
+            description: 绿色分量 0-255
+          - name: b
+            type: integer
+            minimum: 0
+            maximum: 255
+            description: 蓝色分量 0-255
       - name: 查看警示灯状态
         method: GET
         url: "http://49.233.213.109:7100/v1/lights"

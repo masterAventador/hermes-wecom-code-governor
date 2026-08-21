@@ -73,28 +73,80 @@ def test_local_governor_config_contains_known_projects_and_no_secrets() -> None:
             timeout_seconds=30,
         ),
     )
-    assert vpp.http_actions == (
-        HttpAction(
-            name="设置警示灯颜色",
-            method="POST",
-            url="http://49.233.213.109:7100/v1/lights/{light}/command",
-            body_template='{{"action":"color","color":"{color}","mode":"solid"}}',
-            parameters=(
-                HttpActionParameter(name="light", type="integer", minimum=1, maximum=9),
-                HttpActionParameter(
-                    name="color",
-                    type="choice",
-                    choices=("red", "yellow", "green", "blue", "white", "purple", "cyan"),
-                ),
-            ),
-            timeout_seconds=10,
-        ),
-        HttpAction(
-            name="查看警示灯状态",
-            method="GET",
-            url="http://49.233.213.109:7100/v1/lights",
-            timeout_seconds=10,
-        ),
+    actions = {action.name: action for action in vpp.http_actions}
+    # 除蜂鸣器外，YNL308 的四类显示模式都登记了；raw 帧注入不登记（等于绕过白名单）。
+    assert set(actions) == {
+        "设置警示灯颜色",
+        "设置警示灯闪烁",
+        "熄灭警示灯",
+        "设置警示灯流水效果",
+        "自定义警示灯颜色",
+        "查看警示灯状态",
+    }
+    command_url = "http://49.233.213.109:7100/v1/lights/{light}/command"
+    colors = ("red", "yellow", "green", "blue", "white", "purple", "cyan")
+    light_spec = HttpActionParameter(
+        name="light",
+        type="integer",
+        minimum=1,
+        maximum=9,
+        description="灯号：1-8 是现场警示灯，9 是桌面测试灯",
+    )
+    assert all(action.timeout_seconds == 10 for action in vpp.http_actions)
+    assert all(
+        action.url == command_url and action.method == "POST"
+        for name, action in actions.items()
+        if name != "查看警示灯状态"
+    )
+    assert all(
+        action.parameters[0] == light_spec for action in actions.values() if action.parameters
+    )
+
+    solid = actions["设置警示灯颜色"]
+    assert solid.body_template == '{{"action":"color","color":"{color}","mode":"solid"}}'
+    assert solid.parameters[1] == HttpActionParameter(
+        name="color", type="choice", choices=colors, description="灯的颜色"
+    )
+
+    blink = actions["设置警示灯闪烁"]
+    assert (
+        blink.body_template
+        == '{{"action":"color","color":"{color}","mode":"blink","blinkHz":{hz}}}'
+    )
+    hz = blink.parameters[2]
+    assert hz.name == "hz"
+    assert hz.choices == ("16", "8", "4", "2", "1", "0.5", "0.25")
+    assert "快闪" in hz.description and "慢闪" in hz.description
+
+    assert actions["熄灭警示灯"].body_template == '{{"action":"off"}}'
+    assert actions["熄灭警示灯"].parameters == (light_spec,)
+
+    flow = actions["设置警示灯流水效果"]
+    assert (
+        flow.body_template
+        == '{{"action":"flow","color":"{color}","mode":"{effect}","speed":{speed}}}'
+    )
+    assert flow.parameters[2].choices == ("cycle", "bounce", "grow1", "grow2")
+    assert flow.parameters[3] == HttpActionParameter(
+        name="speed",
+        type="integer",
+        minimum=0,
+        maximum=255,
+        description="流水速度：0 最快，255 最慢，一般用 100",
+    )
+
+    rgb = actions["自定义警示灯颜色"]
+    assert rgb.body_template == '{{"action":"rgb","r":{r},"g":{g},"b":{b}}}'
+    assert tuple(parameter.name for parameter in rgb.parameters) == ("light", "r", "g", "b")
+    assert all(
+        parameter.minimum == 0 and parameter.maximum == 255 for parameter in rgb.parameters[1:]
+    )
+
+    assert actions["查看警示灯状态"] == HttpAction(
+        name="查看警示灯状态",
+        method="GET",
+        url="http://49.233.213.109:7100/v1/lights",
+        timeout_seconds=10,
     )
     assert vpp.push_on_merge is True
     assert vpp.job_allowed_commands == (

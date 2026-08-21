@@ -1123,6 +1123,44 @@ def test_prompt_context_lists_http_actions_with_parameter_specs() -> None:
     assert "governor_http_action" in context
 
 
+def test_prompt_context_shows_parameter_descriptions_when_configured() -> None:
+    project = Project(
+        "vpp-digital-twin",
+        "VPP数字孪生项目",
+        Path("/Users/aventador/sourceCode/vpp-digital-twin"),
+        http_actions=(
+            HttpAction(
+                name="设置警示灯闪烁",
+                method="POST",
+                url="http://gateway.test/v1/lights/{light}/command",
+                body_template='{{"action":"color","mode":"blink","blinkHz":{hz}}}',
+                parameters=(
+                    HttpActionParameter(
+                        name="light",
+                        type="integer",
+                        minimum=1,
+                        maximum=9,
+                        description="灯号，9 是桌面测试灯",
+                    ),
+                    HttpActionParameter(
+                        name="hz",
+                        type="choice",
+                        choices=("8", "1"),
+                        description="闪烁频率，快闪用 8，慢闪用 1",
+                    ),
+                ),
+            ),
+        ),
+    )
+    runtime = make_runtime(projects=(project,))
+    runtime.select_project("vpp-digital-twin")
+
+    context = runtime.pre_llm_call()["context"]
+
+    assert "light: 1-9 的整数（灯号，9 是桌面测试灯）" in context
+    assert "hz: 8/1（闪烁频率，快闪用 8，慢闪用 1）" in context
+
+
 def test_remote_task_runs_named_action_and_returns_output() -> None:
     remote = FakeRemote(stdout="VPP-5QH2-34MZ-HRRU\n")
     notices: list[str] = []

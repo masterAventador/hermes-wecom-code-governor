@@ -630,6 +630,35 @@ def test_invalid_http_actions_fail_closed(tmp_path: Path, actions_yaml: str, mes
         load_governor_config(config_path)
 
 
+def test_parameters_carry_an_optional_chinese_description(tmp_path: Path) -> None:
+    # 取值本身说不清语义（16 和 0.25 哪个是"快闪"），描述要能跟着进上下文清单。
+    config_path = _http_actions_config(
+        tmp_path,
+        """
+      - name: 设置警示灯闪烁
+        method: POST
+        url: "http://example.test/v1/lights/{light}/command"
+        body_template: '{{"action":"color","color":"red","mode":"blink","blinkHz":{hz}}}'
+        parameters:
+          - name: light
+            type: integer
+            minimum: 1
+            maximum: 9
+            description: 灯号，1-8 是现场灯，9 是桌面测试灯
+          - name: hz
+            type: choice
+            choices: ['16', '8', '1', '0.25']
+            description: 闪烁频率，数值越大越快
+""".rstrip(),
+    )
+
+    config = load_governor_config(config_path)
+
+    light, hz = config.policy.project("vpp").http_actions[0].parameters
+    assert light.description == "灯号，1-8 是现场灯，9 是桌面测试灯"
+    assert hz.description == "闪烁频率，数值越大越快"
+
+
 def test_integer_parameters_accept_zero_and_negative_bounds(tmp_path: Path) -> None:
     # 亮度 0-100、温差 -20-40 这类登记方式都合法，下界不是"必须为正整数"。
     config_path = _http_actions_config(

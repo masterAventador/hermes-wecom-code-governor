@@ -30,6 +30,9 @@ class HttpActionParameter:
     minimum: int | None = None
     maximum: int | None = None
     choices: tuple[str, ...] = ()
+    # 取值本身往往说不清语义（闪烁频率 16 和 0.25 哪个算"快闪"），这句中文说明
+    # 会跟着参数进模型上下文。
+    description: str = ""
 
 
 @dataclass(frozen=True)

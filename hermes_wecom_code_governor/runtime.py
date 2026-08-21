@@ -797,8 +797,12 @@ class GovernorRuntime:
     @staticmethod
     def _http_parameter_summary(parameter: HttpActionParameter) -> str:
         if parameter.type == "integer":
-            return f"{parameter.name}: {parameter.minimum}-{parameter.maximum} 的整数"
-        return f"{parameter.name}: {'/'.join(parameter.choices)}"
+            summary = f"{parameter.name}: {parameter.minimum}-{parameter.maximum} 的整数"
+        else:
+            summary = f"{parameter.name}: {'/'.join(parameter.choices)}"
+        if parameter.description:
+            summary += f"（{parameter.description}）"
+        return summary
 
     @staticmethod
     def _http_action_line(action: HttpAction) -> str:

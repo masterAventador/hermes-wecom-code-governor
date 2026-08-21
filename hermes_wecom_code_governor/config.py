@@ -281,6 +281,7 @@ def _http_action_parameters(value: Any, field_name: str) -> tuple[HttpActionPara
         if not _HTTP_PARAM_NAME.fullmatch(name):
             raise ValueError(f"{prefix}.name must match [a-z][a-z0-9_]*: {name}")
         kind = _required_string(data, "type", f"{prefix}.type")
+        description = _optional_string(data.get("description"), f"{prefix}.description") or ""
         if kind == "integer":
             if "minimum" not in data or "maximum" not in data:
                 raise ValueError(f"{prefix} integer parameters require minimum and maximum bounds")
@@ -290,7 +291,13 @@ def _http_action_parameters(value: Any, field_name: str) -> tuple[HttpActionPara
             if minimum > maximum:
                 raise ValueError(f"{prefix} integer parameters require minimum <= maximum")
             parameters.append(
-                HttpActionParameter(name=name, type="integer", minimum=minimum, maximum=maximum)
+                HttpActionParameter(
+                    name=name,
+                    type="integer",
+                    minimum=minimum,
+                    maximum=maximum,
+                    description=description,
+                )
             )
         elif kind == "choice":
             choices = _list(data.get("choices"), f"{prefix}.choices")
@@ -301,7 +308,14 @@ def _http_action_parameters(value: Any, field_name: str) -> tuple[HttpActionPara
                 raise ValueError(
                     f"{prefix}.choices must be non-empty values matching [A-Za-z0-9_.-]+"
                 )
-            parameters.append(HttpActionParameter(name=name, type="choice", choices=tuple(choices)))
+            parameters.append(
+                HttpActionParameter(
+                    name=name,
+                    type="choice",
+                    choices=tuple(choices),
+                    description=description,
+                )
+            )
         else:
             raise ValueError(f"{prefix}.type must be integer or choice: {kind}")
     names = [parameter.name for parameter in parameters]
